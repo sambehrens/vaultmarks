@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState { pool, notify_tx };
 
     let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/change-password", post(routes::auth::change_password))
