@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS pg_uuidv7;
-
 CREATE TABLE users (
     id                       UUID PRIMARY KEY DEFAULT uuidv7(),
     email                    TEXT NOT NULL UNIQUE,
