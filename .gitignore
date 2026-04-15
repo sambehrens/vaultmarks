@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Extension
+extension/node_modules/
+extension/dist/
+extension/dist-firefox/
+
+# Server
+server/target/
+server/.env
+
+# Environment
+.env
+
+# Tests
+tests/.test-state.json
+tests/node_modules/
+tests/.tsc-out/
+tests/playwright-report/
+tests/test-results/

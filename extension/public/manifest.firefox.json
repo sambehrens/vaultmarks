@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Aegis Sync",
+  "version": "0.1.0",
+  "description": "Zero-knowledge end-to-end encrypted, conflict-free, offline ready, cross-browser bookmark synchronization.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "aegis-sync@local",
+      "strict_min_version": "121.0"
+    }
+  },
+  "permissions": [
+    "bookmarks",
+    "storage",
+    "identity",
+    "alarms"
+  ],
+  "host_permissions": [],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Aegis Sync"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html", "popup.js", "chunks/*.js", "assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  }
+}
