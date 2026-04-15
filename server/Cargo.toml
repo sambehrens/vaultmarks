@@ -1,12 +1,8 @@
 [package]
-name = "aegis-sync-server"
+name = "server"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.94"
-
-[[bin]]
-name = "server"
-path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
