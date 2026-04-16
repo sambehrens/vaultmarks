@@ -4,14 +4,22 @@ mod error;
 mod models;
 mod routes;
 
-use axum::{extract::FromRef, Router, routing::{delete, get, post}};
-use sqlx::{postgres::{PgListener, PgPoolOptions}, PgPool};
+use axum::{
+    body::Body,
+    extract::{DefaultBodyLimit, FromRef, Request},
+    http::header::{AUTHORIZATION, CONTENT_TYPE},
+    routing::{delete, get, patch, post},
+    Router,
+};
+use sqlx::{
+    postgres::{PgListener, PgPoolOptions},
+    PgPool,
+};
 use tokio::sync::broadcast;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -39,13 +47,14 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "server=debug,tower_http=debug".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "server=debug,tower_http=debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let pool = PgPoolOptions::new()
         .max_connections(20)
@@ -63,17 +72,36 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState { pool, notify_tx };
 
-    let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+    // Body limits: tight for auth/profile metadata (16 KB), moderate for sync
+    // push/pull (2 MB), larger for snapshot uploads (10 MB). Applied per-group
+    // via nested routers so the /ws upgrade is never accidentally body-limited.
+    let auth_routes = Router::new()
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/change-password", post(routes::auth::change_password))
         .route("/auth/account", delete(routes::auth::delete_account))
+        .layer(DefaultBodyLimit::max(16 * 1024)); // 16 KB
+
+    let profile_routes = Router::new()
         .route("/profiles", get(routes::profiles::list).post(routes::profiles::create))
-        .route("/profiles/{id}", axum::routing::patch(routes::profiles::rename).delete(routes::profiles::delete))
+        .route("/profiles/{id}", patch(routes::profiles::rename).delete(routes::profiles::delete))
+        .layer(DefaultBodyLimit::max(16 * 1024)); // 16 KB
+
+    let sync_routes = Router::new()
         .route("/sync/push", post(routes::sync::push))
         .route("/sync/pull", get(routes::sync::pull))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
+
+    let snapshot_routes = Router::new()
         .route("/sync/snapshot", get(routes::sync::get_snapshot).put(routes::sync::put_snapshot))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB
+
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .merge(auth_routes)
+        .merge(profile_routes)
+        .merge(sync_routes)
+        .merge(snapshot_routes)
         .route("/ws", get(routes::ws::handler))
         .layer(
             CorsLayer::new()
@@ -81,7 +109,28 @@ async fn main() -> anyhow::Result<()> {
                 .allow_methods(Any)
                 .allow_headers([AUTHORIZATION, CONTENT_TYPE]),
         )
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            // Redact the JWT token from WebSocket URL logs so it isn't stored
+            // in plaintext by log aggregators. The `?token=...` query parameter
+            // is replaced with `?token=[redacted]` in the tracing span.
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                let uri = request.uri();
+                let sanitised = if uri.path() == "/ws" {
+                    let query = uri.query().unwrap_or("");
+                    let redacted = query
+                        .split('&')
+                        .map(|pair| {
+                            if pair.starts_with("token=") { "token=[redacted]" } else { pair }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    format!("{}?{}", uri.path(), redacted)
+                } else {
+                    uri.to_string()
+                };
+                tracing::debug_span!("request", uri = %sanitised, method = %request.method())
+            }),
+        )
         .with_state(state);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
@@ -97,33 +146,35 @@ async fn main() -> anyhow::Result<()> {
 /// to all subscribed WebSocket handlers. Reconnects automatically on error.
 async fn run_pg_listener(pool: PgPool, tx: NotifyTx) {
     loop {
-        match PgListener::connect_with(&pool).await {
+        let mut listener = match PgListener::connect_with(&pool).await {
+            Ok(l) => l,
             Err(e) => {
                 tracing::error!("pg_listener: connect failed: {e}");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
             }
-            Ok(mut listener) => {
-                if let Err(e) = listener.listen("deltas").await {
-                    tracing::error!("pg_listener: LISTEN failed: {e}");
-                } else {
-                    tracing::info!("pg_listener: listening on 'deltas'");
-                    loop {
-                        match listener.recv().await {
-                            Ok(n) => {
-                                if let Some(msg) = parse_notify(n.payload()) {
-                                    // Ignore send errors — they just mean no
-                                    // WebSocket clients are currently subscribed.
-                                    let _ = tx.send(msg);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("pg_listener: recv error: {e} — reconnecting");
-                                break;
-                            }
-                        }
-                    }
+        };
+
+        if let Err(e) = listener.listen("deltas").await {
+            tracing::error!("pg_listener: LISTEN failed: {e}");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            continue;
+        }
+
+        tracing::info!("pg_listener: listening on 'deltas'");
+        loop {
+            match listener.recv().await {
+                Ok(n) => match parse_notify(n.payload()) {
+                    Some(msg) => { let _ = tx.send(msg); }
+                    None => tracing::warn!("pg_listener: malformed NOTIFY payload: {:?}", n.payload()),
+                },
+                Err(e) => {
+                    tracing::error!("pg_listener: recv error: {e} — reconnecting");
+                    break;
                 }
             }
         }
+
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }

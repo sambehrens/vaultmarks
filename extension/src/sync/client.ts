@@ -1,6 +1,6 @@
 // Sync client — HTTP push/pull and WebSocket notification listener.
 
-import { API_BASE, WS_BASE } from "../config";
+import { API_BASE, WS_BASE, LOG_TAG } from "../config";
 import { getJwt, getActiveProfileId } from "../auth/session";
 import { decrypt, fromBase64 } from "../crypto/aes";
 import { getEncryptionKey } from "../auth/session";
@@ -144,10 +144,11 @@ export async function apiDeleteProfile(profileId: string, jwt: string): Promise<
   await throwIfNotOk(res, "delete profile failed");
 }
 
-export async function apiDeleteAccount(jwt: string): Promise<void> {
+export async function apiDeleteAccount(jwt: string, authKey: string): Promise<void> {
   const res = await fetchWithTimeout(`${API_BASE}/auth/account`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${jwt}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+    body: JSON.stringify({ auth_hash: authKey }),
   });
   await throwIfNotOk(res, "delete account failed");
 }
@@ -238,18 +239,18 @@ async function _pushPendingInner(): Promise<void> {
 
   const jwt = getJwt();
   const activeProfile = getActiveProfileId();
-  console.log(`[aegis] pushPending: ${batch.length} delta(s), activeProfile=${activeProfile}`);
+  console.log(`${LOG_TAG} pushPending: ${batch.length} delta(s), activeProfile=${activeProfile}`);
   const succeeded: string[] = [];
 
   for (const item of batch) {
-    console.log(`[aegis] push: deltaId=${item.id} profileId=${item.profileId} bytes=${item.encryptedDelta.length}`);
+    console.log(`${LOG_TAG} push: deltaId=${item.id} profileId=${item.profileId} bytes=${item.encryptedDelta.length}`);
     const res = await fetchWithTimeout(`${API_BASE}/sync/push`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
       body: JSON.stringify({ profile_id: item.profileId, encrypted_delta: item.encryptedDelta }),
     });
     if (res.ok) {
-      console.log(`[aegis] push: ok for profileId=${item.profileId}`);
+      console.log(`${LOG_TAG} push: ok for profileId=${item.profileId}`);
       succeeded.push(item.id);
     } else if (res.status === 403 && item.profileId === activeProfile) {
       // 403 on the active profile means the account was deleted server-side
@@ -258,10 +259,10 @@ async function _pushPendingInner(): Promise<void> {
     } else if (res.status === 400 || res.status === 403 || res.status === 404) {
       // Unrecoverable: profile doesn't exist, doesn't belong to this user, or
       // the delta is malformed. Discard so it doesn't block subsequent pushes.
-      console.warn(`[aegis] push: discarding unrecoverable delta ${item.id} (HTTP ${res.status}, profileId=${item.profileId})`);
+      console.warn(`${LOG_TAG} push: discarding unrecoverable delta ${item.id} (HTTP ${res.status}, profileId=${item.profileId})`);
       succeeded.push(item.id);
     } else {
-      console.error(`[aegis] push: HTTP ${res.status} for profileId=${item.profileId} (activeProfile=${activeProfile})`);
+      console.error(`${LOG_TAG} push: HTTP ${res.status} for profileId=${item.profileId} (activeProfile=${activeProfile})`);
       // Transient failure (auth error, server error) — stop and retry later.
       break;
     }
@@ -316,10 +317,10 @@ export function openWebSocket(
     }
   };
 
-  ws.onerror = (e) => console.error("[aegis] ws error", e);
+  ws.onerror = (e) => console.error(`${LOG_TAG} ws error`, e);
 
   ws.onclose = () => {
-    console.log("[aegis] ws closed, scheduling reconnect");
+    console.log(`${LOG_TAG} ws closed, scheduling reconnect`);
     // Schedule a reconnect via the alarm so the service worker stays awake.
     chrome.alarms.create("ws-reconnect", { delayInMinutes: 1 / 12 }); // ~5 seconds
     onReconnectNeeded();

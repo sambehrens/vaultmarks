@@ -1,10 +1,16 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{auth::AuthUser, db::queries, error::AppError};
+
+const MAX_PROFILES_PER_USER: i64 = 20;
 
 #[derive(Serialize)]
 pub struct ProfileListItem {
@@ -25,7 +31,10 @@ pub async fn list(
     Ok(Json(ListProfilesResponse {
         profiles: profiles
             .into_iter()
-            .map(|p| ProfileListItem { id: p.id.to_string(), name: p.name })
+            .map(|p| ProfileListItem {
+                id: p.id.to_string(),
+                name: p.name,
+            })
             .collect(),
     }))
 }
@@ -52,6 +61,13 @@ pub async fn create(
         return Err(AppError::BadRequest("profile name cannot be empty".into()));
     }
 
+    let count = queries::count_profiles_by_user(&pool, user_id).await?;
+    if count >= MAX_PROFILES_PER_USER {
+        return Err(AppError::BadRequest(
+            format!("cannot exceed {MAX_PROFILES_PER_USER} profiles per account"),
+        ));
+    }
+
     let metadata = B64
         .decode(&body.encrypted_metadata)
         .map_err(|_| AppError::BadRequest("invalid base64 for encrypted_metadata".into()))?;
@@ -72,27 +88,27 @@ pub struct RenameProfileRequest {
 pub async fn rename(
     State(pool): State<PgPool>,
     AuthUser(user_id): AuthUser,
-    axum::extract::Path(profile_id): axum::extract::Path<Uuid>,
+    Path(profile_id): Path<Uuid>,
     Json(body): Json<RenameProfileRequest>,
-) -> Result<axum::http::StatusCode, AppError> {
+) -> Result<StatusCode, AppError> {
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("profile name cannot be empty".into()));
     }
     if !queries::profile_belongs_to_user(&pool, profile_id, user_id).await? {
         return Err(AppError::Forbidden);
     }
-    queries::rename_profile(&pool, profile_id, body.name.trim()).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    queries::rename_profile(&pool, profile_id, user_id, body.name.trim()).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn delete(
     State(pool): State<PgPool>,
     AuthUser(user_id): AuthUser,
-    axum::extract::Path(profile_id): axum::extract::Path<Uuid>,
-) -> Result<axum::http::StatusCode, AppError> {
+    Path(profile_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
     if !queries::profile_belongs_to_user(&pool, profile_id, user_id).await? {
         return Err(AppError::Forbidden);
     }
-    queries::delete_profile(&pool, profile_id).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    queries::delete_profile(&pool, profile_id, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

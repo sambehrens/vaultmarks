@@ -3,7 +3,8 @@ use axum::{
         ws::{Message, WebSocket},
         Query, State, WebSocketUpgrade,
     },
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -25,18 +26,18 @@ pub async fn handler(
     Query(params): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let user_id = match verify_token(&params.token) {
-        Ok(id) => id,
-        Err(_) => {
-            return axum::response::Response::builder()
-                .status(401)
-                .body(axum::body::Body::empty())
-                .unwrap();
-        }
+    let Ok(user_id) = verify_token(&params.token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
     ws.on_upgrade(move |socket| {
-        handle_socket(socket, state.pool, state.notify_tx, user_id, params.profile_id)
+        handle_socket(
+            socket,
+            state.pool,
+            state.notify_tx,
+            user_id,
+            params.profile_id,
+        )
     })
 }
 

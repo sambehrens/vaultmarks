@@ -7,7 +7,11 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::{auth::{issue_token, AuthUser}, db::queries, error::AppError};
+use crate::{
+    auth::{issue_token, AuthUser},
+    db::queries,
+    error::AppError,
+};
 
 // ── Register ──────────────────────────────────────────────────────────────────
 
@@ -36,21 +40,29 @@ pub async fn register(
     State(pool): State<PgPool>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, AppError> {
-    if queries::find_user_by_email(&pool, &body.email).await?.is_some() {
+    let email = body.email.to_lowercase();
+
+    if queries::find_user_by_email(&pool, &email).await?.is_some() {
         return Err(AppError::BadRequest("email already registered".into()));
     }
 
-    let stored_hash = hash_auth_key(&body.auth_hash)?;
-    let user = queries::create_user(&pool, &body.email, &stored_hash, &body.protected_symmetric_key).await?;
+    let stored_hash = hash_auth_key(&body.auth_hash).await?;
+    let user = match queries::create_user(&pool, &email, &stored_hash, &body.protected_symmetric_key).await {
+        Ok(u) => u,
+        Err(sqlx::Error::Database(e)) if e.constraint() == Some("users_email_key") => {
+            return Err(AppError::BadRequest("email already registered".into()));
+        }
+        Err(e) => return Err(AppError::from(e)),
+    };
 
-    let metadata_bytes = B64
-        .decode(&body.encrypted_profile_metadata)
-        .map_err(|_| AppError::BadRequest("invalid base64 for encrypted_profile_metadata".into()))?;
+    let metadata_bytes = B64.decode(&body.encrypted_profile_metadata).map_err(|_| {
+        AppError::BadRequest("invalid base64 for encrypted_profile_metadata".into())
+    })?;
 
     let profile =
         queries::create_profile(&pool, user.id, &body.profile_name, &metadata_bytes).await?;
 
-    let token = issue_token(user.id).map_err(anyhow::Error::from)?;
+    let token = issue_token(user.id)?;
 
     Ok(Json(RegisterResponse {
         token,
@@ -87,15 +99,17 @@ pub async fn login(
     State(pool): State<PgPool>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let user = queries::find_user_by_email(&pool, &body.email)
+    let email = body.email.to_lowercase();
+
+    let user = queries::find_user_by_email(&pool, &email)
         .await?
         .ok_or(AppError::Unauthorized)?;
 
-    verify_auth_key(&body.auth_hash, &user.auth_hash)?;
+    verify_auth_key(&body.auth_hash, &user.auth_hash).await?;
 
     let profiles = queries::find_profiles_by_user(&pool, user.id).await?;
 
-    let token = issue_token(user.id).map_err(anyhow::Error::from)?;
+    let token = issue_token(user.id)?;
 
     Ok(Json(LoginResponse {
         token,
@@ -126,7 +140,49 @@ pub async fn change_password(
     AuthUser(user_id): AuthUser,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, AppError> {
-    // Re-authenticate: fetch the current auth_hash and verify old password.
+    // Wrap the entire read-verify-write in a transaction with SELECT FOR UPDATE
+    // to eliminate the TOCTOU race between concurrent password change requests.
+    let mut tx = pool.begin().await?;
+
+    let stored_hash = sqlx::query_scalar::<_, String>(
+        "SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
+
+    verify_auth_key(&body.old_auth_hash, &stored_hash).await?;
+
+    let new_stored_hash = hash_auth_key(&body.new_auth_hash).await?;
+    sqlx::query(
+        "UPDATE users SET auth_hash = $1, protected_symmetric_key = $2 WHERE id = $3",
+    )
+    .bind(&new_stored_hash)
+    .bind(&body.new_protected_symmetric_key)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Delete account ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct DeleteAccountRequest {
+    /// Client-derived auth key — re-verified before deletion to prevent
+    /// account wipe from a stolen JWT alone.
+    pub auth_hash: String,
+}
+
+pub async fn delete_account(
+    State(pool): State<PgPool>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<DeleteAccountRequest>,
+) -> Result<StatusCode, AppError> {
     let stored_hash = sqlx::query_scalar::<_, String>(
         "SELECT auth_hash FROM users WHERE id = $1",
     )
@@ -135,50 +191,49 @@ pub async fn change_password(
     .await?
     .ok_or(AppError::Unauthorized)?;
 
-    verify_auth_key(&body.old_auth_hash, &stored_hash)?;
+    verify_auth_key(&body.auth_hash, &stored_hash).await?;
 
-    let new_stored_hash = hash_auth_key(&body.new_auth_hash)?;
-    queries::change_user_password(&pool, user_id, &new_stored_hash, &body.new_protected_symmetric_key).await?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ── Delete account ────────────────────────────────────────────────────────────
-
-pub async fn delete_account(
-    State(pool): State<PgPool>,
-    AuthUser(user_id): AuthUser,
-) -> Result<StatusCode, AppError> {
     queries::delete_user(&pool, user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn hash_auth_key(auth_key: &str) -> Result<String, AppError> {
-    let salt = SaltString::generate(&mut OsRng);
-    // In TEST_MODE use minimal params so integration tests don't time out
-    // waiting for server-side Argon2id (which can be very slow in Docker on Mac).
-    let argon2 = if std::env::var("TEST_MODE").is_ok() {
-        Argon2::new(
-            argon2::Algorithm::Argon2id,
-            argon2::Version::V0x13,
-            argon2::Params::new(1024, 1, 1, None)
-                .expect("valid test params"),
-        )
-    } else {
-        Argon2::default()
-    };
-    argon2
-        .hash_password(auth_key.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("argon2 hash failed: {e}")))
+async fn hash_auth_key(auth_key: &str) -> Result<String, AppError> {
+    let auth_key = auth_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let salt = SaltString::generate(&mut OsRng);
+        // In TEST_MODE use minimal params so integration tests don't time out
+        // waiting for server-side Argon2id (which can be very slow in Docker on Mac).
+        let argon2 = if std::env::var("TEST_MODE").is_ok() {
+            tracing::warn!("TEST_MODE is active — using weak Argon2id params. Do NOT use in production.");
+            Argon2::new(
+                argon2::Algorithm::Argon2id,
+                argon2::Version::V0x13,
+                argon2::Params::new(1024, 1, 1, None).expect("valid test params"),
+            )
+        } else {
+            Argon2::default()
+        };
+        argon2
+            .hash_password(auth_key.as_bytes(), &salt)
+            .map(|h| h.to_string())
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("argon2 hash failed: {e}")))
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking failed: {e}")))?
 }
 
-fn verify_auth_key(auth_key: &str, stored_hash: &str) -> Result<(), AppError> {
-    let parsed = PasswordHash::new(stored_hash)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid stored hash: {e}")))?;
-    Argon2::default()
-        .verify_password(auth_key.as_bytes(), &parsed)
-        .map_err(|_| AppError::Unauthorized)
+async fn verify_auth_key(auth_key: &str, stored_hash: &str) -> Result<(), AppError> {
+    let auth_key = auth_key.to_owned();
+    let stored_hash = stored_hash.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let parsed = PasswordHash::new(&stored_hash)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid stored hash: {e}")))?;
+        Argon2::default()
+            .verify_password(auth_key.as_bytes(), &parsed)
+            .map_err(|_| AppError::Unauthorized)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking failed: {e}")))?
 }

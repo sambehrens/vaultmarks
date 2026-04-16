@@ -1,14 +1,17 @@
-use axum::{extract::FromRequestParts, http::{header::AUTHORIZATION, request::Parts, StatusCode}};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use uuid::Uuid;
 use crate::models::Claims;
+use axum::{
+    extract::FromRequestParts,
+    http::{header::AUTHORIZATION, request::Parts, StatusCode},
+};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use uuid::Uuid;
 
 fn jwt_secret() -> String {
     std::env::var("JWT_SECRET").expect("JWT_SECRET must be set")
 }
 
 pub fn issue_token(user_id: Uuid) -> anyhow::Result<String> {
-    let exp = (chrono::Utc::now() + chrono::TimeDelta::days(365)).timestamp() as usize;
+    let exp = (chrono::Utc::now() + chrono::TimeDelta::days(30)).timestamp() as usize;
     let claims = Claims { sub: user_id, exp };
     let token = encode(
         &Header::default(),
@@ -22,7 +25,7 @@ pub fn verify_token(token: &str) -> Result<Uuid, ()> {
     let data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(jwt_secret().as_bytes()),
-        &Validation::default(),
+        &Validation::new(Algorithm::HS256),
     )
     .map_err(|_| ())?;
     Ok(data.claims.sub)

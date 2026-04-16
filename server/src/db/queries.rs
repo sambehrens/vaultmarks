@@ -1,6 +1,6 @@
+use crate::models::{Delta, Profile, User};
 use sqlx::PgPool;
 use uuid::Uuid;
-use crate::models::{Delta, Profile, User};
 
 // ── Users ────────────────────────────────────────────────────────────────────
 
@@ -30,22 +30,6 @@ pub async fn create_user(
     .await
 }
 
-pub async fn change_user_password(
-    pool: &PgPool,
-    user_id: Uuid,
-    new_auth_hash: &str,
-    new_protected_symmetric_key: &str,
-) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE users SET auth_hash = $1, protected_symmetric_key = $2 WHERE id = $3",
-    )
-    .bind(new_auth_hash)
-    .bind(new_protected_symmetric_key)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
 
 // ── Profiles ─────────────────────────────────────────────────────────────────
 
@@ -78,20 +62,25 @@ pub async fn find_profiles_by_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result
     .await
 }
 
+pub async fn count_profiles_by_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM profiles WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+}
+
 /// Returns true if the profile exists and belongs to the given user.
 pub async fn profile_belongs_to_user(
     pool: &PgPool,
     profile_id: Uuid,
     user_id: Uuid,
 ) -> sqlx::Result<bool> {
-    let row = sqlx::query(
-        "SELECT 1 FROM profiles WHERE id = $1 AND user_id = $2",
-    )
-    .bind(profile_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.is_some())
+    sqlx::query("SELECT 1 FROM profiles WHERE id = $1 AND user_id = $2")
+        .bind(profile_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map(|r| r.is_some())
 }
 
 // ── Deltas ───────────────────────────────────────────────────────────────────
@@ -112,20 +101,38 @@ pub async fn insert_delta(
     .await
 }
 
+/// Fetch up to 500 deltas after `since_seq` for a profile.
+/// Returns `(deltas, has_more)` where `has_more` signals a subsequent page is available.
 pub async fn fetch_deltas_since(
     pool: &PgPool,
     profile_id: Uuid,
     since_seq: i64,
-) -> sqlx::Result<Vec<Delta>> {
-    sqlx::query_as::<_, Delta>(
+) -> sqlx::Result<(Vec<Delta>, bool)> {
+    // Fetch one extra row to detect whether more pages exist, without loading them.
+    let mut rows = sqlx::query_as::<_, Delta>(
         "SELECT sequence_id, profile_id, encrypted_payload, created_at
          FROM deltas
          WHERE profile_id = $1 AND sequence_id > $2
-         ORDER BY sequence_id ASC",
+         ORDER BY sequence_id ASC
+         LIMIT 501",
     )
     .bind(profile_id)
     .bind(since_seq)
     .fetch_all(pool)
+    .await?;
+
+    let has_more = rows.len() > 500;
+    rows.truncate(500);
+    Ok((rows, has_more))
+}
+
+/// Returns the max sequence_id for a profile, or None if no deltas exist.
+pub async fn max_sequence_id(pool: &PgPool, profile_id: Uuid) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(sequence_id) FROM deltas WHERE profile_id = $1",
+    )
+    .bind(profile_id)
+    .fetch_one(pool)
     .await
 }
 
@@ -136,14 +143,13 @@ pub async fn get_profile_snapshot(
     pool: &PgPool,
     profile_id: Uuid,
 ) -> sqlx::Result<Option<(i64, Vec<u8>)>> {
-    let row = sqlx::query_as::<_, (i64, Vec<u8>)>(
+    sqlx::query_as::<_, (i64, Vec<u8>)>(
         "SELECT snapshot_seq, encrypted_payload
          FROM profile_snapshots WHERE profile_id = $1",
     )
     .bind(profile_id)
     .fetch_optional(pool)
-    .await?;
-    Ok(row)
+    .await
 }
 
 /// Upsert the compacted snapshot for a profile.
@@ -167,31 +173,40 @@ pub async fn upsert_profile_snapshot(
     .bind(snapshot_seq)
     .bind(encrypted_payload)
     .execute(pool)
-    .await?;
-    Ok(())
+    .await
+    .map(|_| ())
 }
 
-pub async fn rename_profile(pool: &PgPool, profile_id: Uuid, name: &str) -> sqlx::Result<()> {
-    sqlx::query("UPDATE profiles SET name = $1 WHERE id = $2")
+/// Renames a profile. The `user_id` guard prevents renaming profiles owned by other users.
+pub async fn rename_profile(
+    pool: &PgPool,
+    profile_id: Uuid,
+    user_id: Uuid,
+    name: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE profiles SET name = $1 WHERE id = $2 AND user_id = $3")
         .bind(name)
         .bind(profile_id)
+        .bind(user_id)
         .execute(pool)
-        .await?;
-    Ok(())
+        .await
+        .map(|_| ())
 }
 
-pub async fn delete_profile(pool: &PgPool, profile_id: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM profiles WHERE id = $1")
+/// Deletes a profile. The `user_id` guard prevents deleting profiles owned by other users.
+pub async fn delete_profile(pool: &PgPool, profile_id: Uuid, user_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM profiles WHERE id = $1 AND user_id = $2")
         .bind(profile_id)
+        .bind(user_id)
         .execute(pool)
-        .await?;
-    Ok(())
+        .await
+        .map(|_| ())
 }
 
 pub async fn delete_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(pool)
-        .await?;
-    Ok(())
+        .await
+        .map(|_| ())
 }

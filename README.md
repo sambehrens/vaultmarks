@@ -1,4 +1,4 @@
-# Aegis Sync
+# Vaultmarks
 
 Cross-browser bookmark synchronization with end-to-end encryption and conflict-free merging via CRDTs.
 
@@ -82,7 +82,7 @@ Every 50 deltas, the active client uploads a compacted snapshot (`PUT /sync/snap
 | Server | Rust, Axum, Tokio |
 | Database | PostgreSQL |
 | Real-time | WebSocket + `pg_notify` |
-| Deployment | fly.io |
+| Deployment | Railway |
 
 ## Prerequisites
 
@@ -105,7 +105,7 @@ cd bookmark-sync
 ### 2. Start PostgreSQL
 
 ```bash
-brew services start postgresql@16
+brew services start postgresql@18
 ```
 
 ### 3. Set up the server
@@ -120,7 +120,7 @@ cp .env.example .env
 Edit `server/.env`:
 
 ```env
-DATABASE_URL=postgres://localhost/aegis_sync
+DATABASE_URL=postgres://localhost/vaultmarks
 JWT_SECRET=<any-long-random-string>
 ```
 
@@ -205,6 +205,12 @@ Temporary add-ons are removed when Firefox closes. Re-load after each restart, o
 
 All encrypted fields are base64-encoded AES-256-GCM blobs in JSON. The server never decrypts them.
 
+### Health
+
+#### `GET /health`
+
+Returns `200 ok`. Used by Railway's health check and uptime monitors.
+
 ### Auth
 
 #### `POST /auth/register`
@@ -256,6 +262,18 @@ Requires `Authorization: Bearer <token>`.
 ```
 
 The server re-authenticates with `old_auth_hash` before updating. No data re-encryption is needed — only the PSK wrapper changes.
+
+Response: `204 No Content`
+
+#### `DELETE /auth/account`
+
+Requires `Authorization: Bearer <token>`.
+
+Permanently deletes the account and all associated profiles and deltas (cascade). Requires re-authentication.
+
+```json
+{ "auth_hash": "<base64>" }
+```
 
 Response: `204 No Content`
 
@@ -393,7 +411,7 @@ extension/
 │   ├── storage/        IndexedDB abstraction (snapshots, delta queue, meta)
 │   ├── auth/           Session store — JWT, CryptoKey, PSK, profile list,
 │   │                   chrome.storage persistence, lock/unlock
-│   ├── config.ts       API base URL
+│   ├── config.ts       API base URL, app identity constants (name, storage keys, log tag)
 │   └── types.ts        Popup ↔ background message protocol
 ├── public/
 │   ├── manifest.json          Chrome / Chromium manifest
@@ -424,7 +442,7 @@ sqlx migrate add <description>        # creates server/migrations/<ts>_<descript
 sqlx migrate run                      # apply pending migrations
 
 # Check server logs with structured output
-RUST_LOG=aegis_sync_server=debug cargo run
+RUST_LOG=server=debug cargo run
 
 # Type-check the extension without building
 cd extension && npm run lint
@@ -433,10 +451,11 @@ cd extension && npm run lint
 cd extension && npm run build:firefox && npm run dev
 web-ext run --source-dir dist/
 
-# Point the extension at a different server
+# Point the extension at a different server temporarily (overrides .env.production)
 # Create extension/.env.local:
-echo 'VITE_API_BASE=https://your-server.fly.dev' > extension/.env.local
+echo 'VITE_API_BASE=https://your-server.up.railway.app' > extension/.env.local
 npm run build
+# For production builds, edit extension/.env.production directly
 ```
 
 ## Integration tests
@@ -455,6 +474,9 @@ Tests run serially (one worker) since they share a server and database. Account 
 | `specs/auth.spec.ts` | Register (auto-detected), login, wrong password, lock/unlock, sign out |
 | `specs/profiles.spec.ts` | Create, switch, rename, delete profiles; active-profile delete guard |
 | `specs/sync.spec.ts` | Bookmark created in browser A appears in browser B after sync |
+| `specs/cross-browser.spec.ts` | Chrome ↔ Firefox sync round-trip |
+| `specs/import-conflict.spec.ts` | Import conflict and locked-changes resolution (returning device with local-only bookmarks) |
+| `specs/firefox.spec.ts` | Firefox extension tests — currently skipped (Playwright BiDi cannot navigate moz-extension:// URLs) |
 
 ### Running locally
 
@@ -568,20 +590,49 @@ open tests/test-results/
 
 ### CI
 
-The integration tests run automatically on push and pull requests via `.github/workflows/integration.yml` whenever `extension/`, `server/`, or `tests/` files change.
+Three workflows run automatically on push and pull requests:
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `.github/workflows/integration.yml` | `extension/`, `server/`, or `tests/` changes | Full end-to-end tests via Playwright + Testcontainers |
+| `.github/workflows/extension.yml` | `extension/` changes | TypeScript type-check and extension build |
+| `.github/workflows/server.yml` | `server/` changes | Rust build and server unit tests |
 
 On Linux, Chrome requires a virtual display. The workflow uses `xvfb-run` for this. Docker is available by default on `ubuntu-latest` runners, so Testcontainers works without any additional setup.
 
 If a test run fails, the Playwright HTML report is uploaded as a CI artifact (`playwright-report`) and retained for 7 days.
 
-## Deployment (fly.io)
+## Deployment (Railway)
+
+The server deploys to [Railway](https://railway.app). Migrations run automatically on startup — no separate migration step needed.
+
+### First-time setup
+
+1. Create a new project in the Railway dashboard
+2. Add a **PostgreSQL** database service — Railway injects `DATABASE_URL` automatically
+3. Connect the GitHub repository and set the root directory to `server/`
+4. Set the required secret:
 
 ```bash
-cd server
-fly launch          # first time — provisions app and Postgres
-fly deploy          # subsequent deploys
-
-# Set secrets
-fly secrets set JWT_SECRET="$(openssl rand -base64 32)"
-fly secrets set DATABASE_URL="<postgres connection string>"
+railway variables set JWT_SECRET="$(openssl rand -base64 32)"
 ```
+
+### Subsequent deploys
+
+Push to `main` — Railway redeploys automatically.
+
+To deploy manually via the CLI:
+
+```bash
+railway up
+```
+
+### Extension configuration
+
+Set the production API URL in `extension/.env.production`:
+
+```env
+VITE_API_BASE=https://your-project.up.railway.app
+```
+
+Then rebuild: `cd extension && npm run build`

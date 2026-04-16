@@ -1,4 +1,8 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Json,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -59,6 +63,10 @@ pub struct PullQuery {
 #[derive(Serialize)]
 pub struct PullResponse {
     pub deltas: Vec<DeltaEntry>,
+    /// True when more than 500 deltas are available after `since_seq`.
+    /// The client should pull again with `since_seq` set to the last
+    /// `sequence_id` received until `has_more` is false.
+    pub has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -73,11 +81,16 @@ pub async fn pull(
     AuthUser(user_id): AuthUser,
     Query(params): Query<PullQuery>,
 ) -> Result<Json<PullResponse>, AppError> {
+    if params.since_seq < 0 {
+        return Err(AppError::BadRequest("since_seq must be >= 0".into()));
+    }
+
     if !queries::profile_belongs_to_user(&pool, params.profile_id, user_id).await? {
         return Err(AppError::Forbidden);
     }
 
-    let deltas = queries::fetch_deltas_since(&pool, params.profile_id, params.since_seq).await?;
+    let (deltas, has_more) =
+        queries::fetch_deltas_since(&pool, params.profile_id, params.since_seq).await?;
 
     Ok(Json(PullResponse {
         deltas: deltas
@@ -87,6 +100,7 @@ pub async fn pull(
                 encrypted_payload: B64.encode(&d.encrypted_payload),
             })
             .collect(),
+        has_more,
     }))
 }
 
@@ -134,8 +148,8 @@ pub async fn get_snapshot(
 }
 
 /// PUT /sync/snapshot — upsert a compacted snapshot for a profile.
-/// Only accepted if snapshot_seq is greater than the current stored seq,
-/// ensuring the server snapshot only ever moves forward.
+/// Only accepted if snapshot_seq is greater than the current stored seq and
+/// corresponds to an actual delta that has been committed.
 pub async fn put_snapshot(
     State(pool): State<PgPool>,
     AuthUser(user_id): AuthUser,
@@ -143,6 +157,19 @@ pub async fn put_snapshot(
 ) -> Result<StatusCode, AppError> {
     if !queries::profile_belongs_to_user(&pool, body.profile_id, user_id).await? {
         return Err(AppError::Forbidden);
+    }
+
+    // Validate that snapshot_seq references a real committed delta to prevent
+    // a client from uploading a fabricated high seq that starves new-device pulls.
+    let max_seq = queries::max_sequence_id(&pool, body.profile_id).await?;
+    match max_seq {
+        None => return Err(AppError::BadRequest("no deltas exist for this profile".into())),
+        Some(max) if body.snapshot_seq > max => {
+            return Err(AppError::BadRequest(
+                "snapshot_seq exceeds the latest committed delta".into(),
+            ));
+        }
+        _ => {}
     }
 
     let payload = B64
