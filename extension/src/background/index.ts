@@ -687,9 +687,16 @@ async function initializeDocs(
       // not yet in the account. If so, pause init and let the user decide.
       const diff = await computeLocalImportDiff();
       if (diff.localOnly > 0) {
+        // Persist the server state before returning. Without this, the snapshot
+        // for this profile is never written to IndexedDB during the conflict
+        // flow (the normal persistSnapshot at line ~697 is bypassed by this early
+        // return). handleRecomputeImportDiff relies on loadSnapshot(originalProfileId)
+        // to restore the original doc after loading a comparison profile — if it
+        // returns null it falls back to initDoc() (empty), causing handleResolveImport
+        // to persist an empty snapshot and subsequently wipe Chrome bookmarks when
+        // the user later switches to this profile.
+        await persistSnapshot(profileId);
         // Early return: don't reconcile or attach listeners until resolved.
-        // persistSnapshot is intentionally skipped — the Loro doc has server
-        // data but Chrome still has the user's original bookmarks.
         return { pendingImport: diff };
       }
     }

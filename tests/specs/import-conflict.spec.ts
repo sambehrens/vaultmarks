@@ -277,6 +277,119 @@ test("login conflict → new profile: local bookmarks saved to separate profile"
   }
 });
 
+// ── Compare-with switch does not corrupt original profile snapshot ────────────
+//
+// Regression: when an existing user logs in on a brand-new device (no local
+// IndexedDB snapshot), initializeDocs pulls the server state, detects a conflict
+// (Chrome has local-only bookmarks), and returns early WITHOUT persisting the
+// snapshot.  If the user then switches "Compare with" to a different profile,
+// handleRecomputeImportDiff calls loadSnapshot(originalProfileId) → null (never
+// persisted) → falls back to initDoc() (empty).  handleResolveImport then calls
+// persistSnapshot(originalProfileId) with the empty doc, wiping the profile when
+// the user later switches to it.
+//
+// The fix is a single `await persistSnapshot(profileId)` added before the early
+// return in initializeDocs so the original profile's server state is always in
+// IndexedDB before the conflict UI is shown.
+
+test("compare-with switch does not corrupt original profile snapshot (new device)", async () => {
+  // This test requires a server snapshot to be present so that syncFrom() returns
+  // early without calling persistSnapshot(). Without a server snapshot, syncFrom()
+  // pulls deltas and calls persistSnapshot() itself — masking the bug.
+  //
+  // Three-browser setup:
+  //   A  — registers and seeds Default + Work profiles.
+  //   B  — logs in with no local bookmarks → no conflict → initializeDocs falls
+  //         through and uploads the server snapshot for Default (the key precondition).
+  //   C  — fresh device with urlWork in Chrome → logs in → conflict → compare with
+  //         Work (0 conflicts) → Continue → switch to Default → assert Default intact.
+  //
+  // Without the fix, C's initializeDocs finds the server snapshot, loads it, then
+  // calls syncFrom(snapshotSeq) which returns early (no new deltas) WITHOUT calling
+  // persistSnapshot. The snapshot is never in IndexedDB. handleRecomputeImportDiff
+  // then gets null from loadSnapshot and falls back to initDoc() (empty), causing
+  // handleResolveImport to persist an empty snapshot for Default. Switching to
+  // Default later loads the empty snapshot and wipes Chrome.
+
+  const { extensionDist } = readState();
+  const email = uniqueEmail();
+  const password = "test-password-123";
+  // urlDefault: only in the Default server profile — must survive the whole flow.
+  const urlDefault = `https://example.com/cf-snap-default-${Date.now()}`;
+  // urlWork: in both the Work server profile and C's Chrome before login.
+  // When C compares with Work, localOnly=0 and serverOnly=0 → "Continue" button.
+  const urlWork = `https://example.com/cf-snap-work-${Date.now()}`;
+
+  const A = await launchChromeBrowser(extensionDist);
+  const B = await launchChromeBrowser(extensionDist);
+  const C = await launchChromeBrowser(extensionDist);
+  try {
+    // A registers and seeds the Default profile with urlDefault.
+    await A.helper.register(email, password);
+    await createBookmark(A.page, { title: "Default Bookmark", url: urlDefault });
+    await A.page.waitForTimeout(DELTA_ENQUEUE_WAIT);
+    await A.helper.sync();
+
+    // A creates a Work profile with urlWork, then syncs it to the server.
+    await A.helper.createProfile("Work");
+    await A.helper.switchProfile("Work");
+    await createBookmark(A.page, { title: "Work Bookmark", url: urlWork });
+    await A.page.waitForTimeout(DELTA_ENQUEUE_WAIT);
+    await A.helper.sync();
+
+    // B logs in with an empty Chrome — no conflict. initializeDocs pulls the
+    // Default delta (seq=1), applies it, and because it is the first full sync
+    // on a new device with no prior server snapshot, uploads a server snapshot
+    // for Default at seq=1. This is the precondition for the bug: without a
+    // server snapshot, syncFrom always processes deltas and calls persistSnapshot
+    // itself, masking the missing call in initializeDocs.
+    await B.helper.login(email, password);
+    await B.helper.sync(); // ensures the fire-and-forget server snapshot upload has completed
+
+    // C is a fresh device (new tmpdir, empty IndexedDB). Place urlWork in
+    // Chrome before logging in so a conflict is detected against Default.
+    await createBookmark(C.page, { title: "Work Bookmark", url: urlWork });
+
+    // C logs in. initializeDocs:
+    //   • finds the server snapshot uploaded by B → initDoc(snapshot) → Default has urlDefault
+    //   • setMeta(lastSeqId-defaultId, 1)
+    //   • syncFrom(defaultId, 1, checkImport=true) → no new deltas → returns early WITHOUT persistSnapshot
+    //   • computeLocalImportDiff() → localOnly=1 (urlWork in Chrome, not in Default)
+    //   • WITHOUT FIX: returns { pendingImport } without calling persistSnapshot
+    //     → Default snapshot never lands in IndexedDB
+    await C.helper.submit(email, password);
+    await C.helper.waitForImportConflict();
+
+    // Switch "Compare with" to Work. localOnly drops to 0 (urlWork is in both
+    // Chrome and Work). handleRecomputeImportDiff:
+    //   • initDoc() → clears Loro doc
+    //   • syncFrom(workId, 0) → loads Work delta
+    //   • loadSnapshot(defaultId) → null WITHOUT FIX → falls back to initDoc() (empty)
+    await C.helper.compareImportWith("Work");
+
+    // Click "Continue" (button text when localOnly=0). resolveImport sends
+    // choice="overwrite", targetProfileId=Work. handleResolveImport calls
+    // persistSnapshot(defaultId) — persisting the empty doc WITHOUT FIX.
+    await C.page.getByRole("button", { name: "Continue" }).click({ force: true });
+    await C.helper.waitForMainView(15_000);
+
+    // C is now on the Work profile. Switch to Default.
+    await C.helper.switchProfile("Default");
+    await C.page.waitForTimeout(DELTA_ENQUEUE_WAIT);
+    await C.helper.sync();
+
+    // Default must still contain urlDefault. WITHOUT FIX: initializeDocs loads
+    // the empty stored snapshot → reconcileBookmarks wipes Chrome → test fails.
+    const urlsDefault = (await getAllBookmarks(C.page)).map((b) => b.url);
+    expect(urlsDefault, "Default profile bookmark must survive the compare-with flow").toContain(urlDefault);
+    expect(urlsDefault).not.toContain(urlWork);
+  } finally {
+    await closeBrowser(A);
+    await closeBrowser(B);
+    await closeBrowser(C);
+  }
+});
+
 // ── Compare-with diff: duplicate URL counting ─────────────────────────────────
 //
 // When the user changes the "Compare with" selector in the import conflict modal
