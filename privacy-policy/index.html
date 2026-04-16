@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Vaultmarks</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      color: #1a1a1a;
+      background: #fff;
+      margin: 0;
+      padding: 48px 24px 96px;
+    }
+
+    .container {
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .wordmark {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #1a1a1a;
+      text-decoration: none;
+      display: inline-block;
+      margin-bottom: 48px;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+    }
+
+    .subtitle {
+      color: #666;
+      margin: 0 0 48px;
+    }
+
+    h2 {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 40px 0 8px;
+    }
+
+    p, li {
+      color: #333;
+      margin: 0 0 12px;
+    }
+
+    ul {
+      padding-left: 20px;
+      margin: 0 0 12px;
+    }
+
+    .highlight {
+      background: #f5f5f5;
+      border-left: 3px solid #1a1a1a;
+      padding: 14px 18px;
+      margin: 24px 0;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .highlight p {
+      margin: 0;
+      font-size: 15px;
+    }
+
+    a {
+      color: #1a1a1a;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid #e5e5e5;
+      margin: 48px 0 24px;
+    }
+
+    footer {
+      color: #999;
+      font-size: 14px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body { background: #111; color: #f0f0f0; }
+      .wordmark { color: #f0f0f0; }
+      h1 { color: #f0f0f0; }
+      .subtitle { color: #999; }
+      h2 { color: #f0f0f0; }
+      p, li { color: #ccc; }
+      .highlight { background: #1e1e1e; border-left-color: #f0f0f0; }
+      hr { border-top-color: #333; }
+      a { color: #f0f0f0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a class="wordmark" href="#">Vaultmarks</a>
+
+    <h1>Privacy Policy</h1>
+    <p class="subtitle">Last updated: April 15, 2025</p>
+
+    <div class="highlight">
+      <p>Vaultmarks is designed so that we cannot read your bookmarks. Your data is encrypted on your device before it is sent to our servers. We have no way to decrypt it.</p>
+    </div>
+
+    <h2>What we collect</h2>
+    <p>We collect only what is necessary to operate the service:</p>
+    <ul>
+      <li><strong>Email address</strong> — used to identify your account. We do not send marketing email.</li>
+      <li><strong>Encrypted bookmark data</strong> — your bookmarks are encrypted on your device using a key derived from your master password before being sent to our servers. We store the ciphertext only. We cannot read the contents.</li>
+      <li><strong>Authentication credential</strong> — we store a hashed authentication key derived from your password. Your actual password never leaves your device.</li>
+    </ul>
+    <p>We do not collect your browsing history, location, device information, or any other personal data beyond what is listed above.</p>
+
+    <h2>What we do not collect</h2>
+    <ul>
+      <li>Passwords (only a client-derived key hash is transmitted)</li>
+      <li>Browsing or web history</li>
+      <li>Location data</li>
+      <li>Analytics or usage telemetry</li>
+      <li>Advertising identifiers</li>
+    </ul>
+
+    <h2>How we use your data</h2>
+    <p>Your email address is used solely to authenticate you and identify your account. Your encrypted bookmark data is stored solely to sync it across your devices. We do not use your data for any other purpose.</p>
+
+    <h2>Third parties</h2>
+    <p>We do not sell, share, or transfer your data to any third party. Our sync server is the only system your data is sent to.</p>
+
+    <h2>Data retention</h2>
+    <p>Your data is retained for as long as your account exists. You can permanently delete your account and all associated data at any time from within the extension. Deletion is immediate and irreversible.</p>
+
+    <h2>Security</h2>
+    <p>All bookmark data is encrypted client-side using AES-GCM with a 256-bit key derived from your master password via HKDF. The server holds only ciphertext and a hashed authentication credential. Even in the event of a server breach, your bookmark contents cannot be read.</p>
+
+    <h2>Open source</h2>
+    <p>The extension's source code is publicly available on GitHub. You can verify exactly what data the extension collects and how it is handled.</p>
+
+    <h2>Changes to this policy</h2>
+    <p>If we make material changes to this policy, we will update the date at the top of this page.</p>
+
+    <h2>Contact</h2>
+    <p>Questions about this policy can be directed to <a href="mailto:vaultmarkssync@gmail.com">vaultmarkssync@gmail.com</a>.</p>
+
+    <hr />
+    <footer>
+      &copy; 2025 Vaultmarks. All rights reserved.
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vaultmarks Bookmark Syncing",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Zero-knowledge end-to-end encrypted, conflict-free, offline ready, cross-browser bookmark synchronization.",
   "browser_specific_settings": {
     "gecko": {
@@ -12,7 +12,6 @@
   "permissions": [
     "bookmarks",
     "storage",
-    "identity",
     "alarms"
   ],
   "host_permissions": [],

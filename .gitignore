@@ -5,6 +5,8 @@
 extension/node_modules/
 extension/dist/
 extension/dist-firefox/
+extension/vaultmarks.zip
+extension/vaultmarks-firefox.zip
 
 # Server
 server/target/
