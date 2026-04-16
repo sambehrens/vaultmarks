@@ -729,18 +729,30 @@ async function initializeDocs(
 
 let _syncInProgress = false;
 
+// True while a profile switch (handleSwitchProfile) is executing.  SSE/alarm
+// syncFrom callers check this and skip so they never race with a mid-switch
+// initializeDocs / reconcileBookmarks call.
+let _switchInProgress = false;
+
+// When a switch arrives while another is already running, the desired target
+// profile is queued here.  The drain loop in handleSwitchProfile drains it
+// before releasing _switchInProgress, applying all pending switches in order
+// without running any two concurrently.
+let _pendingSwitchProfileId: string | null = null;
+
 /**
  * Pull deltas from `sinceSeq`, apply them to the Loro doc, persist the
  * snapshot, and (unless skipReconcile) reconcile Chrome.
  *
- * `exclusive` (default true) makes concurrent reactive calls (WS handler,
- * alarm) return immediately if a sync is already running — preventing two
- * reconcileBookmarks() calls from interleaving and causing bookmark flickering.
+ * `exclusive` (default true) makes concurrent reactive calls (SSE handler,
+ * alarm) return immediately if a sync or profile switch is already running —
+ * preventing two reconcileBookmarks() calls from interleaving and causing
+ * bookmark flickering or duplicates.
  * Pass false only from init/unlock paths that must always run to completion.
  */
 async function syncFrom(profileId: string, sinceSeq: number, skipReconcile = false, exclusive = true): Promise<void> {
-  if (exclusive && _syncInProgress) {
-    console.log(`${LOG_TAG} syncFrom: already in progress, skipping (profile=${profileId.slice(0,8)})`);
+  if (exclusive && (_switchInProgress || _syncInProgress)) {
+    console.log(`${LOG_TAG} syncFrom: skipping (switching=${_switchInProgress} syncing=${_syncInProgress} profile=${profileId.slice(0,8)})`);
     return;
   }
   _syncInProgress = true;
@@ -1020,15 +1032,51 @@ async function handleDeleteAccount(authKey: string): Promise<ExtResponse> {
 
 async function handleSwitchProfile(profileId: string): Promise<ExtResponse> {
   if (isLocked()) return { type: "SWITCH_ERROR", error: "Session is locked." };
+
+  if (_switchInProgress) {
+    // Another switch is already running.  Queue this target so the drain loop
+    // below picks it up — this prevents concurrent initializeDocs / reconcile
+    // calls that would interleave Chrome bookmark mutations and create duplicates.
+    _pendingSwitchProfileId = profileId;
+    return { type: "SWITCH_SUCCESS" };
+  }
+
+  _switchInProgress = true;
   try {
-    console.log(`${LOG_TAG} switchProfile → ${profileId.slice(0,8)}`);
-    switchSessionProfile(profileId);
-    await initializeDocs(profileId, false); // don't merge: Chrome still shows previous profile
-    startSync();
+    let targetId = profileId;
+    while (true) {
+      _pendingSwitchProfileId = null;
+      console.log(`${LOG_TAG} switchProfile → ${targetId.slice(0, 8)}`);
+
+      // Tear down the previous profile's sync state before starting the next
+      // initializeDocs.  Without this, an in-flight SSE callback or alarm-triggered
+      // syncFrom could run a concurrent reconcileBookmarks, duplicating bookmarks.
+      if (sse) { sse.close(); sse = null; }
+      chrome.alarms.clear("sync-poll");
+      chrome.alarms.clear("ws-reconnect");
+      detachBookmarkListeners();
+
+      switchSessionProfile(targetId);
+      await initializeDocs(targetId, false); // don't merge: Chrome still shows previous profile
+      startSync();
+
+      if (_pendingSwitchProfileId === null) break;
+      targetId = _pendingSwitchProfileId;
+    }
     return { type: "SWITCH_SUCCESS" };
   } catch (err) {
     console.error(`${LOG_TAG} switchProfile error`, err);
     return { type: "SWITCH_ERROR", error: String(err) };
+  } finally {
+    _switchInProgress = false;
+    _pendingSwitchProfileId = null;
+    // Notify the popup that the drain loop has fully settled (bookmarks reconciled,
+    // SSE started). Use setTimeout so this push arrives AFTER the SWITCH_SUCCESS
+    // response — the popup keeps its spinner until it receives this message.
+    const settledProfileId = getActiveProfileId();
+    setTimeout(() => {
+      chrome.runtime.sendMessage({ type: "SWITCH_SETTLED", profileId: settledProfileId }).catch(() => {});
+    }, 0);
   }
 }
 

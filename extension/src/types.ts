@@ -67,7 +67,11 @@ export type ExtMessage =
 
 /** Unsolicited messages pushed from the background to the popup. */
 export type ExtPush =
-  | { type: "PROFILE_SWITCHED"; profileId: string };
+  | { type: "PROFILE_SWITCHED"; profileId: string }
+  /** Fired after handleSwitchProfile's drain loop fully settles (bookmarks
+   *  reconciled, sync started). The popup uses this to know when it's safe to
+   *  clear the profile-switch spinner and fire a final SYNC. */
+  | { type: "SWITCH_SETTLED"; profileId: string };
 
 export type ExtResponse =
   | {

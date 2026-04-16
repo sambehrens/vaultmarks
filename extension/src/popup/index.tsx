@@ -257,6 +257,21 @@ function App() {
   chrome.runtime.onMessage.addListener((msg: ExtPush) => {
     if (msg.type === "PROFILE_SWITCHED") {
       setProfile(profiles().find((p) => p.id === msg.profileId));
+    } else if (msg.type === "SWITCH_SETTLED") {
+      // The drain loop has fully settled — bookmarks are reconciled and SSE is open.
+      // Update the active profile and do a final sync to flush any deltas that
+      // arrived during the switch (common on slow connections where the SSE fires
+      // a new-seq notification shortly after initializeDocs returns).
+      setProfile(profiles().find((p) => p.id === msg.profileId));
+      send({ type: "SYNC" })
+        .then((syncRes) => {
+          if (syncRes.type === "SYNC_SUCCESS") {
+            setLastSynced(syncRes.lastSynced);
+            if (syncRes.profiles) setProfiles(syncRes.profiles);
+          }
+        })
+        .catch(console.error)
+        .finally(() => setSwitchingProfileId(undefined));
     }
   });
 
@@ -424,10 +439,13 @@ function App() {
   async function switchProfile(profileId: string) {
     setSwitchingProfileId(profileId);
     const res = await send({ type: "SWITCH_PROFILE", profileId });
-    setSwitchingProfileId(undefined);
-    if (res.type === "SWITCH_SUCCESS") {
-      setProfile(profiles().find((p) => p.id === profileId));
+    if (res.type === "SWITCH_ERROR") {
+      // On error, clear the spinner immediately — no SWITCH_SETTLED will follow.
+      setSwitchingProfileId(undefined);
     }
+    // On SWITCH_SUCCESS: keep the spinner active.
+    // The background will push SWITCH_SETTLED once the drain loop fully settles
+    // (bookmarks reconciled, sync started). The message listener below handles it.
   }
 
   async function createProfile(e: Event) {
