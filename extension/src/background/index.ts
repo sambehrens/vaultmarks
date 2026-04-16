@@ -2,7 +2,7 @@
 // Orchestrates: crypto → auth → Loro doc → sync → bookmark bridge.
 
 import { encrypt, decrypt } from "../crypto/aes";
-import { initDoc, exportSnapshot, exportEmptySnapshot, importUpdate, getBookmarksFromSnapshot } from "../crdt/loro-doc";
+import { initDoc, exportSnapshot, exportEmptySnapshot, getBookmarksFromSnapshot } from "../crdt/loro-doc";
 import { loadSnapshot, saveSnapshot, getMeta, setMeta, clearDeltaQueue, deleteProfileData, clearAllLocalData } from "../storage/db";
 import {
   setSession,
@@ -256,7 +256,7 @@ async function handleLogin(
     // Import the wrapping key so we can decrypt the PSK returned by the server.
     const wrappingKey = await crypto.subtle.importKey(
       "raw",
-      wrappingKeyBytes,
+      new Uint8Array(wrappingKeyBytes),
       { name: "AES-GCM" },
       false,
       ["encrypt", "decrypt"],
@@ -304,7 +304,7 @@ async function handleLogin(
     const symmetricKeyBytes = await decrypt(wrappingKey, protectedSymmetricKey);
     const encryptionKey = await crypto.subtle.importKey(
       "raw",
-      symmetricKeyBytes,
+      new Uint8Array(symmetricKeyBytes),
       { name: "AES-GCM" },
       false,
       ["encrypt", "decrypt"],
@@ -339,7 +339,7 @@ async function handleUnlock(encryptionKeyBytes: Uint8Array): Promise<ExtResponse
   try {
     const encryptionKey = await crypto.subtle.importKey(
       "raw",
-      encryptionKeyBytes,
+      new Uint8Array(encryptionKeyBytes),
       { name: "AES-GCM" },
       false,
       ["encrypt", "decrypt"],

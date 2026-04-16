@@ -2,7 +2,7 @@
 
 import { API_BASE, LOG_TAG } from "../config";
 import { getJwt, getActiveProfileId } from "../auth/session";
-import { decrypt, fromBase64 } from "../crypto/aes";
+import { decrypt } from "../crypto/aes";
 import { getEncryptionKey } from "../auth/session";
 import { peek, acknowledge } from "./delta-queue";
 import type { QueuedDelta } from "../storage/db";

@@ -4,7 +4,7 @@
 /** Encrypts `plaintext` with `key`. Returns IV-prepended ciphertext as base64. */
 export async function encrypt(key: CryptoKey, plaintext: Uint8Array): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new Uint8Array(plaintext));
   const result = new Uint8Array(12 + ciphertext.byteLength);
   result.set(iv);
   result.set(new Uint8Array(ciphertext), 12);

@@ -91,17 +91,6 @@ const ExpandVerticalIcon = () => (
 
 // ── Shared style objects ───────────────────────────────────────────────────────
 
-const iconBtn = {
-  background: "none",
-  border: "none",
-  cursor: "pointer",
-  padding: "5px",
-  color: "var(--text-secondary)",
-  display: "flex",
-  "align-items": "center",
-  "border-radius": "5px",
-} as const;
-// Note: iconBtn is kept for occasional programmatic style merges; prefer class="btn-icon" on elements.
 
 const panelHeader = {
   display: "flex",
@@ -328,7 +317,7 @@ function App() {
       // recover the symmetric encryption key — wrong password → AES-GCM auth failure.
       const stored = await chrome.storage.local.get(STORAGE_KEYS.protectedSymmetricKey) as Record<string, any>;
       if (!stored[STORAGE_KEYS.protectedSymmetricKey]) throw new Error("No protected key found — please sign in again.");
-      const wrappingKey = await crypto.subtle.importKey("raw", wrappingKeyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+      const wrappingKey = await crypto.subtle.importKey("raw", new Uint8Array(wrappingKeyBytes), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
       let symmetricKeyBytes: Uint8Array;
       try {
         symmetricKeyBytes = await decrypt(wrappingKey, stored[STORAGE_KEYS.protectedSymmetricKey]);
@@ -594,7 +583,7 @@ function App() {
       // Read the stored PSK and decrypt it with the old wrapping key.
       const stored = await chrome.storage.local.get(STORAGE_KEYS.protectedSymmetricKey) as Record<string, any>;
       if (!stored[STORAGE_KEYS.protectedSymmetricKey]) throw new Error("No protected key found — please sign in again.");
-      const oldWrappingKey = await crypto.subtle.importKey("raw", oldKeys.wrappingKeyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+      const oldWrappingKey = await crypto.subtle.importKey("raw", new Uint8Array(oldKeys.wrappingKeyBytes), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
       let symmetricKeyBytes: Uint8Array;
       try {
         symmetricKeyBytes = await decrypt(oldWrappingKey, stored[STORAGE_KEYS.protectedSymmetricKey]);
@@ -603,7 +592,7 @@ function App() {
       }
 
       // Re-encrypt the symmetric key with the new wrapping key.
-      const newWrappingKey = await crypto.subtle.importKey("raw", newKeys.wrappingKeyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+      const newWrappingKey = await crypto.subtle.importKey("raw", new Uint8Array(newKeys.wrappingKeyBytes), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
       const newProtectedSymmetricKey = await encrypt(newWrappingKey, symmetricKeyBytes);
 
       const res = await send({
@@ -919,7 +908,7 @@ function App() {
 
           {/* ── Pending locked changes ── */}
           <Show when={!initializing() && isLoggedIn() && !isLocked() && pendingChanges()}>
-            {() => {
+            {(_) => {
               const c = pendingChanges()!;
               const lines: string[] = [];
               if (c.added)    lines.push(`${c.added} bookmark${c.added !== 1 ? "s" : ""} added`);
@@ -949,7 +938,7 @@ function App() {
 
           {/* ── Import conflict ── */}
           <Show when={!initializing() && isLoggedIn() && !isLocked() && pendingImport()}>
-            {() => {
+            {(_) => {
               // Default to zero counts so inner Show conditions don't throw if
               // pendingImport() transitions to undefined during SolidJS teardown
               // before the outer Show has finished unmounting its children.

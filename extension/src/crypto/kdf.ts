@@ -39,7 +39,7 @@ export async function deriveKeys(masterPassword: string, email: string): Promise
     ARGON2_PARAMS,
   );
 
-  const keyMaterial = await crypto.subtle.importKey("raw", masterKeyBytes, { name: "HKDF" }, false, ["deriveBits"]);
+  const keyMaterial = await crypto.subtle.importKey("raw", new Uint8Array(masterKeyBytes), { name: "HKDF" }, false, ["deriveBits"]);
 
   const [authKeyBits, wrappingKeyBits] = await Promise.all([
     crypto.subtle.deriveBits(

@@ -2,7 +2,7 @@
 // Uses a static import so Vite does not wrap it with __vitePreload(), which
 // accesses `document` and throws inside the background service worker.
 
-import { LoroDoc, VersionVector } from "loro-wasm";
+import { LoroDoc, LoroMap, VersionVector } from "loro-wasm";
 
 export interface BookmarkNode {
   title: string;
@@ -58,7 +58,7 @@ export function importUpdate(data: Uint8Array): void {
 export function getBookmarksFromSnapshot(snapshot: Uint8Array): Record<string, BookmarkNode> {
   const tempDoc = new LoroDoc();
   tempDoc.import(snapshot);
-  return tempDoc.getMap("bookmarks").toJSON() as Record<string, BookmarkNode>;
+  return ((tempDoc as unknown as LoroDocWithContainers).getMap("bookmarks")).toJSON() as Record<string, BookmarkNode>;
 }
 
 /** Opaque version vector — used as a cursor for delta exports. */
@@ -68,25 +68,30 @@ export function currentVersion(): Uint8Array {
 
 /** Register a callback invoked whenever the doc changes. */
 export function subscribe(callback: () => void): () => void {
-  const id = doc().subscribe(callback);
-  return () => doc().unsubscribe(id);
+  // loro-wasm v1: subscribe() returns a cleanup function typed as `any`.
+  return doc().subscribe(callback) as () => void;
 }
 
 // ── Bookmark accessors ────────────────────────────────────────────────────────
 
+// loro-wasm v1 types omit several methods that exist at runtime.
+// Cast through augmented interfaces so the rest of the code stays typed.
+type LoroMapFull = LoroMap & { set(key: string, value: unknown): void };
+type LoroDocWithContainers = LoroDoc & { getMap(name: string): LoroMapFull };
+function docMap(name: string): LoroMapFull {
+  return (doc() as unknown as LoroDocWithContainers).getMap(name);
+}
+
 export function setBookmark(id: string, node: BookmarkNode): void {
-  const map = doc().getMap("bookmarks");
-  map.set(id, node);
+  docMap("bookmarks").set(id, node);
   doc().commit();
 }
 
 export function deleteBookmark(id: string): void {
-  const map = doc().getMap("bookmarks");
-  map.delete(id);
+  docMap("bookmarks").delete(id);
   doc().commit();
 }
 
 export function getAllBookmarks(): Record<string, BookmarkNode> {
-  const map = doc().getMap("bookmarks");
-  return map.toJSON() as Record<string, BookmarkNode>;
+  return docMap("bookmarks").toJSON() as Record<string, BookmarkNode>;
 }
