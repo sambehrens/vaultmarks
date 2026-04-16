@@ -9,7 +9,7 @@
     "identity",
     "alarms"
   ],
-  "host_permissions": [],
+  "host_permissions": ["https://api.vaultmarks.com/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },

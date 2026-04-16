@@ -704,7 +704,7 @@ function App() {
         await send({ type: "SET_SESSION_TIMEOUT", value: timeout });
       }
     }
-    if (exportOnGetStarted()) {
+    if (hadExistingBookmarks() && exportOnGetStarted()) {
       await exportBookmarksBackup().catch(console.error);
     }
     setOnboardingLoading(false);

@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(profile_routes)
         .merge(sync_routes)
         .merge(snapshot_routes)
-        .route("/ws", get(routes::ws::handler))
+        .route("/events", get(routes::events::handler))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
             // is replaced with `?token=[redacted]` in the tracing span.
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
                 let uri = request.uri();
-                let sanitised = if uri.path() == "/ws" {
+                let sanitised = if uri.path() == "/events" {
                     let query = uri.query().unwrap_or("");
                     let redacted = query
                         .split('&')

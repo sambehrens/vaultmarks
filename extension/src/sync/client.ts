@@ -1,6 +1,6 @@
-// Sync client — HTTP push/pull and WebSocket notification listener.
+// Sync client — HTTP push/pull and SSE notification listener.
 
-import { API_BASE, WS_BASE, LOG_TAG } from "../config";
+import { API_BASE, LOG_TAG } from "../config";
 import { getJwt, getActiveProfileId } from "../auth/session";
 import { decrypt, fromBase64 } from "../crypto/aes";
 import { getEncryptionKey } from "../auth/session";
@@ -295,36 +295,99 @@ export async function pullSince(sinceSeq: number, explicitProfileId?: string): P
   );
 }
 
-// ── WebSocket ─────────────────────────────────────────────────────────────────
+// ── Server-Sent Events ────────────────────────────────────────────────────────
 
 export type OnNewSeq = (sequenceId: number) => void;
 
-export function openWebSocket(
+export interface SseConnection {
+  readonly closed: boolean;
+  close(): void;
+}
+
+/**
+ * Open a Server-Sent Events stream for real-time sequence-ID notifications.
+ * Uses fetch() + ReadableStream so it works in extension service workers where
+ * EventSource is unavailable.  On disconnect, schedules a "ws-reconnect" alarm
+ * (name kept for backward compat with existing installed instances) and calls
+ * onReconnectNeeded.
+ */
+export function openEventStream(
   profileId: string,
   token: string,
   onNewSeq: OnNewSeq,
   onReconnectNeeded: () => void,
-): WebSocket {
-  const url = `${WS_BASE}/ws?token=${encodeURIComponent(token)}&profile_id=${encodeURIComponent(profileId)}`;
-  const ws = new WebSocket(url);
+): SseConnection {
+  let closed = false;
+  const abortController = new AbortController();
 
-  ws.onmessage = (event) => {
+  const url = `${API_BASE}/events?token=${encodeURIComponent(token)}&profile_id=${encodeURIComponent(profileId)}`;
+
+  const run = async () => {
+    let response: Response;
     try {
-      const msg = JSON.parse(event.data as string) as { sequence_id: number };
-      onNewSeq(msg.sequence_id);
+      response = await fetch(url, { signal: abortController.signal });
     } catch {
-      // ignore malformed frames
+      // Aborted or network error.
+      if (!closed) scheduleReconnect();
+      return;
     }
+
+    if (!response.ok || !response.body) {
+      console.error(`${LOG_TAG} sse: unexpected status ${response.status}`);
+      if (!closed) scheduleReconnect();
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by double newlines.
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const event of events) {
+          for (const line of event.split("\n")) {
+            if (line.startsWith("data: ")) {
+              try {
+                const msg = JSON.parse(line.slice(6)) as { sequence_id: number };
+                onNewSeq(msg.sequence_id);
+              } catch {
+                // ignore malformed events
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Stream interrupted by abort or network error.
+    }
+
+    if (!closed) scheduleReconnect();
   };
 
-  ws.onerror = (e) => console.error(`${LOG_TAG} ws error`, e);
-
-  ws.onclose = () => {
-    console.log(`${LOG_TAG} ws closed, scheduling reconnect`);
-    // Schedule a reconnect via the alarm so the service worker stays awake.
-    chrome.alarms.create("ws-reconnect", { delayInMinutes: 1 / 12 }); // ~5 seconds
+  const scheduleReconnect = () => {
+    closed = true;
+    console.log(`${LOG_TAG} sse closed, scheduling reconnect`);
+    chrome.alarms.create("ws-reconnect", { delayInMinutes: 1 / 12 }); // ~5 s
     onReconnectNeeded();
   };
 
-  return ws;
+  run().catch(() => {
+    if (!closed) scheduleReconnect();
+  });
+
+  return {
+    get closed() { return closed; },
+    close() {
+      closed = true;
+      abortController.abort();
+    },
+  };
 }

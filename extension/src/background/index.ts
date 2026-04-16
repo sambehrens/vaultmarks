@@ -39,7 +39,8 @@ import {
   apiDeleteAccount,
   pushPending,
   pullSince,
-  openWebSocket,
+  openEventStream,
+  SseConnection,
 } from "../sync/client";
 import { enqueueDelta } from "../sync/delta-queue";
 import {
@@ -77,7 +78,7 @@ function onAuthExpired(): void {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-let ws: WebSocket | null = null;
+let sse: SseConnection | null = null;
 let lastSynced: number | undefined;
 
 // When the user unlocks and there are offline changes, initialization pauses
@@ -130,6 +131,7 @@ restoreFromSessionStorage().then(async (restored) => {
     return;
   }
   if (!isLocked()) {
+    setIconLocked(false); // extension reload resets the icon to the manifest default (signedout)
     // Check if a pending import conflict was waiting for user input before the SW was killed.
     const stored = await chrome.storage.session.get(PENDING_IMPORT_KEY) as Record<string, any>;
     if (stored[PENDING_IMPORT_KEY]) {
@@ -146,7 +148,7 @@ restoreFromSessionStorage().then(async (restored) => {
     console.log(`${LOG_TAG} session partially restored (locked) — key bytes missing`);
     setIconLocked(true);
     // Only push already-encrypted pending deltas (no key needed).
-    // Don't open the WebSocket — incoming deltas require decryption.
+    // Don't open the event stream — incoming deltas require decryption.
     // startSync() runs after the user enters their master password.
     pushPending().catch((err) => {
       if (err instanceof AuthExpiredError) { onAuthExpired(); return; }
@@ -797,24 +799,19 @@ async function persistSnapshot(profileId: string): Promise<void> {
   await saveSnapshot(profileId, exportSnapshot());
 }
 
-/** Open (or reopen) the WebSocket for the active profile. */
-function connectWebSocket(): void {
+/** Open (or reopen) the SSE event stream for the active profile. */
+function connectEventStream(): void {
   const profileId = getActiveProfileId();
   const jwt = getJwt();
 
   if (!profileId) return;
 
-  // Null all handlers before closing so the old socket doesn't fire spurious
-  // error/close events after we've moved on to a new connection.
-  if (ws) {
-    ws.onclose = null;
-    ws.onerror = null;
-    ws.onmessage = null;
-    ws.close();
-    ws = null;
+  if (sse) {
+    sse.close();
+    sse = null;
   }
 
-  ws = openWebSocket(profileId, jwt, async (newSeq) => {
+  sse = openEventStream(profileId, jwt, async (newSeq) => {
     const lastSeq: number = (await getMeta<number>(`lastSeqId-${profileId}`)) ?? 0;
     if (newSeq > lastSeq) {
       await syncFrom(profileId, lastSeq).catch((err) => {
@@ -823,15 +820,15 @@ function connectWebSocket(): void {
       });
     }
   }, () => {
-    // onReconnectNeeded: handled by the "ws-reconnect" alarm below.
+    // onReconnectNeeded: handled by the "ws-reconnect" alarm in openEventStream.
   });
 }
 
 /**
- * Full sync startup: open the WebSocket, drain the push queue, and (re)start
- * the 60-second poll alarm. Only call this on login, unlock, profile switch,
- * and SW restart — NOT from the ws-reconnect alarm, which should call
- * connectWebSocket() directly to avoid resetting the poll timer.
+ * Full sync startup: open the SSE event stream, drain the push queue, and
+ * (re)start the 60-second poll alarm. Only call this on login, unlock, profile
+ * switch, and SW restart — NOT from the ws-reconnect alarm, which should call
+ * connectEventStream() directly to avoid resetting the poll timer.
  */
 function startSync(): void {
   if (!getActiveProfileId()) {
@@ -839,7 +836,7 @@ function startSync(): void {
     return;
   }
 
-  connectWebSocket();
+  connectEventStream();
 
   // Immediately drain any locally queued deltas.
   pushPending().catch((err) => {
@@ -847,7 +844,7 @@ function startSync(): void {
     console.error(err);
   });
 
-  // Poll every 60 s as a fallback (in case the WS drops and isn't reconnected).
+  // Poll every 60 s as a fallback (in case the event stream drops and isn't reconnected).
   // Only create if not already running — prevents the ws-reconnect loop from
   // resetting the timer every 5 s in browsers where WebSocket is unavailable.
   chrome.alarms.get("sync-poll", (existing) => {
@@ -860,26 +857,26 @@ function startSync(): void {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   // Wait for the full startup sequence (session restore + initializeDocs +
   // startSync) before acting. Without this, the alarm handler would see
-  // isLoggedIn() === false and skip the sync, leaving the WebSocket closed
+  // isLoggedIn() === false and skip the sync, leaving the event stream closed
   // and updates only arriving when the user manually opens the popup.
   await _startupComplete;
 
   if (!isLoggedIn() || isLocked()) return;
 
   if (alarm.name === "ws-reconnect") {
-    if (!ws || ws.readyState === WebSocket.CLOSED) {
-      // Only reconnect the WebSocket — don't call startSync() which would
+    if (!sse || sse.closed) {
+      // Only reconnect the event stream — don't call startSync() which would
       // reset the sync-poll alarm and break the 60 s polling cadence.
-      connectWebSocket();
+      connectEventStream();
     }
     return;
   }
 
   if (alarm.name === "sync-poll") {
     const profileId = getActiveProfileId();
-    // Re-open the WebSocket if it dropped since the last poll.
-    if (!ws || ws.readyState === WebSocket.CLOSED) {
-      connectWebSocket();
+    // Re-open the event stream if it dropped since the last poll.
+    if (!sse || sse.closed) {
+      connectEventStream();
     }
 
     // Fallback for browsers (e.g. Orion) where chrome.bookmarks events don't
@@ -933,7 +930,7 @@ function setIconLocked(locked: boolean): void {
 // ── Lock ──────────────────────────────────────────────────────────────────────
 
 async function handleLock(): Promise<ExtResponse> {
-  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (sse) { sse.close(); sse = null; }
   chrome.alarms.clear("sync-poll");
   chrome.alarms.clear("ws-reconnect");
   detachBookmarkListeners();
@@ -977,7 +974,7 @@ async function handleExportProfile(profileId: string): Promise<ExtResponse> {
 // ── Logout ────────────────────────────────────────────────────────────────────
 
 async function handleLogout(clearBookmarks = false): Promise<ExtResponse> {
-  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (sse) { sse.close(); sse = null; }
   chrome.alarms.clear("sync-poll");
   chrome.alarms.clear("ws-reconnect");
   detachBookmarkListeners(); // must be detached before clearing so no deltas are enqueued
@@ -999,7 +996,7 @@ async function handleDeleteAccount(authKey: string): Promise<ExtResponse> {
     const jwt = getJwt();
     await apiDeleteAccount(jwt, authKey);
     // Tear down active session exactly like logout, then wipe all local data.
-    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    if (sse) { sse.close(); sse = null; }
     chrome.alarms.clear("sync-poll");
     chrome.alarms.clear("ws-reconnect");
     detachBookmarkListeners();
