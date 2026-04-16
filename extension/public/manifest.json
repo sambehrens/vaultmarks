@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Aegis Sync",
+  "name": "Vaultmarks Bookmark Syncing",
   "version": "0.1.0",
   "description": "Zero-knowledge end-to-end encrypted, conflict-free, offline ready, cross-browser bookmark synchronization.",
   "permissions": [
@@ -19,7 +19,22 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Aegis Sync"
+    "default_title": "Vaultmarks",
+    "default_icon": {
+      "16": "assets/icon-signedout-16.png",
+      "48": "assets/icon-signedout-48.png",
+      "128": "assets/icon-signedout-128.png"
+    }
+  },
+  "commands": {
+    "next-profile": {
+      "suggested_key": { "default": "Alt+Shift+J" },
+      "description": "Switch to next profile"
+    },
+    "prev-profile": {
+      "suggested_key": { "default": "Alt+Shift+K" },
+      "description": "Switch to previous profile"
+    }
   },
   "icons": {
     "16": "assets/icon-16.png",

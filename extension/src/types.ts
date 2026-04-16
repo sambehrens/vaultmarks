@@ -63,7 +63,11 @@ export type ExtMessage =
   | { type: "SYNC" }
   | { type: "RECOMPUTE_IMPORT_DIFF"; profileId: string }
   | { type: "EXPORT_PROFILE"; profileId: string }
-  | { type: "DELETE_ACCOUNT" };
+  | { type: "DELETE_ACCOUNT"; authKey: string };
+
+/** Unsolicited messages pushed from the background to the popup. */
+export type ExtPush =
+  | { type: "PROFILE_SWITCHED"; profileId: string };
 
 export type ExtResponse =
   | {

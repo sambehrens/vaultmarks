@@ -2,7 +2,8 @@ import { createSignal, createMemo, createEffect, Show, For } from "solid-js";
 import { render } from "solid-js/web";
 import { deriveKeys } from "../crypto/kdf";
 import { encrypt, decrypt } from "../crypto/aes";
-import type { ExtMessage, ExtResponse, ProfileInfo, PendingChanges, ImportDiff, SessionTimeout } from "../types";
+import type { ExtMessage, ExtResponse, ExtPush, ProfileInfo, PendingChanges, ImportDiff, SessionTimeout } from "../types";
+import { APP_NAME, STORAGE_KEYS } from "../config";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,18 @@ const TrashIcon = () => (
 const GitHubIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: "16px", height: "16px", display: "block" }}>
     <path d="M12.001 2C6.47598 2 2.00098 6.475 2.00098 12C2.00098 16.425 4.86348 20.1625 8.83848 21.4875C9.33848 21.575 9.52598 21.275 9.52598 21.0125C9.52598 20.775 9.51348 19.9875 9.51348 19.15C7.00098 19.6125 6.35098 18.5375 6.15098 17.975C6.03848 17.6875 5.55098 16.8 5.12598 16.5625C4.77598 16.375 4.27598 15.9125 5.11348 15.9C5.90098 15.8875 6.46348 16.625 6.65098 16.925C7.55098 18.4375 8.98848 18.0125 9.56348 17.75C9.65098 17.1 9.91348 16.6625 10.201 16.4125C7.97598 16.1625 5.65098 15.3 5.65098 11.475C5.65098 10.3875 6.03848 9.4875 6.67598 8.7875C6.57598 8.5375 6.22598 7.5125 6.77598 6.1375C6.77598 6.1375 7.61348 5.875 9.52598 7.1625C10.326 6.9375 11.176 6.825 12.026 6.825C12.876 6.825 13.726 6.9375 14.526 7.1625C16.4385 5.8625 17.276 6.1375 17.276 6.1375C17.826 7.5125 17.476 8.5375 17.376 8.7875C18.0135 9.4875 18.401 10.375 18.401 11.475C18.401 15.3125 16.0635 16.1625 13.8385 16.4125C14.201 16.725 14.5135 17.325 14.5135 18.2625C14.5135 19.6 14.501 20.675 14.501 21.0125C14.501 21.275 14.6885 21.5875 15.1885 21.4875C19.259 20.1133 21.9999 16.2963 22.001 12C22.001 6.475 17.526 2 12.001 2Z" />
+  </svg>
+);
+
+const LoaderIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: "12px", height: "12px", display: "block" }}>
+    <path d="M3.05469 13H5.07065C5.55588 16.3923 8.47329 19 11.9998 19C15.5262 19 18.4436 16.3923 18.9289 13H20.9448C20.4474 17.5 16.6323 21 11.9998 21C7.36721 21 3.55213 17.5 3.05469 13ZM3.05469 11C3.55213 6.50005 7.36721 3 11.9998 3C16.6323 3 20.4474 6.50005 20.9448 11H18.9289C18.4436 7.60771 15.5262 5 11.9998 5C8.47329 5 5.55588 7.60771 5.07065 11H3.05469Z" />
+  </svg>
+);
+
+const ExpandVerticalIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: "11px", height: "11px", display: "block", "flex-shrink": "0" }}>
+    <path d="M11.9995 0.499512L16.9492 5.44926L15.535 6.86347L12.9995 4.32794V9.99951H10.9995L10.9995 4.32794L8.46643 6.86099L7.05222 5.44678L11.9995 0.499512ZM10.9995 13.9995L10.9995 19.6704L8.46448 17.1353L7.05026 18.5496L12 23.4995L16.9497 18.5498L15.5355 17.1356L12.9995 19.6716V13.9995H10.9995Z" />
   </svg>
 );
 
@@ -199,6 +212,7 @@ function App() {
   const [deleteAccountConfirm, setDeleteAccountConfirm] = createSignal(false);
   const [deleteAccountLoading, setDeleteAccountLoading] = createSignal(false);
   const [deleteAccountError, setDeleteAccountError] = createSignal<string | undefined>();
+  const [deleteAccountPassword, setDeleteAccountPassword] = createSignal("");
 
   // ── Startup ──
   createEffect(() => {
@@ -237,6 +251,13 @@ function App() {
         }
       }
     }).catch(console.error).finally(() => setInitializing(false));
+  });
+
+  // Listen for background-initiated state changes (e.g. keyboard shortcut profile switch).
+  chrome.runtime.onMessage.addListener((msg: ExtPush) => {
+    if (msg.type === "PROFILE_SWITCHED") {
+      setProfile(profiles().find((p) => p.id === msg.profileId));
+    }
   });
 
   // ── Auth actions ──
@@ -290,12 +311,12 @@ function App() {
 
       // Read the PSK from local storage and decrypt it with the wrapping key to
       // recover the symmetric encryption key — wrong password → AES-GCM auth failure.
-      const stored = await chrome.storage.local.get("aegis_protectedSymmetricKey") as { aegis_protectedSymmetricKey?: string };
-      if (!stored.aegis_protectedSymmetricKey) throw new Error("No protected key found — please sign in again.");
+      const stored = await chrome.storage.local.get(STORAGE_KEYS.protectedSymmetricKey) as Record<string, any>;
+      if (!stored[STORAGE_KEYS.protectedSymmetricKey]) throw new Error("No protected key found — please sign in again.");
       const wrappingKey = await crypto.subtle.importKey("raw", wrappingKeyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
       let symmetricKeyBytes: Uint8Array;
       try {
-        symmetricKeyBytes = await decrypt(wrappingKey, stored.aegis_protectedSymmetricKey);
+        symmetricKeyBytes = await decrypt(wrappingKey, stored[STORAGE_KEYS.protectedSymmetricKey]);
       } catch {
         throw new Error("Incorrect password.");
       }
@@ -372,7 +393,7 @@ function App() {
       choice: importAction(),
       excludeDuplicates: importExcludeDupes(),
       profileName: importProfileName(),
-      targetProfileId: importAction() === "merge" ? importComparedProfileId() : undefined,
+      targetProfileId: (importAction() === "merge" || importAction() === "overwrite") ? importComparedProfileId() : undefined,
     });
     setImportResolving(false);
     setPendingImport(undefined);
@@ -398,10 +419,12 @@ function App() {
     }
   }
 
+  const [switchingProfileId, setSwitchingProfileId] = createSignal<string | undefined>();
+
   async function switchProfile(profileId: string) {
-    setLoading(true);
+    setSwitchingProfileId(profileId);
     const res = await send({ type: "SWITCH_PROFILE", profileId });
-    setLoading(false);
+    setSwitchingProfileId(undefined);
     if (res.type === "SWITCH_SUCCESS") {
       setProfile(profiles().find((p) => p.id === profileId));
     }
@@ -551,12 +574,12 @@ function App() {
       ]);
 
       // Read the stored PSK and decrypt it with the old wrapping key.
-      const stored = await chrome.storage.local.get("aegis_protectedSymmetricKey") as { aegis_protectedSymmetricKey?: string };
-      if (!stored.aegis_protectedSymmetricKey) throw new Error("No protected key found — please sign in again.");
+      const stored = await chrome.storage.local.get(STORAGE_KEYS.protectedSymmetricKey) as Record<string, any>;
+      if (!stored[STORAGE_KEYS.protectedSymmetricKey]) throw new Error("No protected key found — please sign in again.");
       const oldWrappingKey = await crypto.subtle.importKey("raw", oldKeys.wrappingKeyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
       let symmetricKeyBytes: Uint8Array;
       try {
-        symmetricKeyBytes = await decrypt(oldWrappingKey, stored.aegis_protectedSymmetricKey);
+        symmetricKeyBytes = await decrypt(oldWrappingKey, stored[STORAGE_KEYS.protectedSymmetricKey]);
       } catch {
         throw new Error("Current password is incorrect.");
       }
@@ -590,10 +613,15 @@ function App() {
   // ── Delete account ────────────────────────────────────────────────────────────
 
   async function deleteAccount() {
+    if (!deleteAccountPassword()) {
+      setDeleteAccountError("Please enter your password to confirm.");
+      return;
+    }
     setDeleteAccountLoading(true);
     setDeleteAccountError(undefined);
     try {
-      const res = await send({ type: "DELETE_ACCOUNT" });
+      const keys = await deriveKeys(deleteAccountPassword(), email());
+      const res = await send({ type: "DELETE_ACCOUNT", authKey: keys.authKey });
       if (res.type === "DELETE_ACCOUNT_SUCCESS") {
         setIsLoggedIn(false);
         setIsLocked(false);
@@ -601,6 +629,7 @@ function App() {
         setProfiles([]);
         setPassword("");
         setEmail("");
+        setDeleteAccountPassword("");
         setView("main");
         setDeleteAccountConfirm(false);
       } else if (res.type === "DELETE_ACCOUNT_ERROR") {
@@ -752,7 +781,7 @@ function App() {
               "font-weight": "500",
               "letter-spacing": "0.02em",
               color: "var(--text-primary)",
-            }}>Aegis Sync</span>
+            }}>{APP_NAME}</span>
             <div style={{ display: "flex", gap: "2px" }}>
               <Show when={isLoggedIn() && !isLocked() && !onboarding() && !pendingChanges() && !pendingImport()}>
                 <button
@@ -979,7 +1008,7 @@ function App() {
           {/* ── Onboarding (new account) ── */}
           <Show when={!initializing() && isLoggedIn() && !isLocked() && onboarding()}>
             <form onSubmit={finishOnboarding}>
-              <p style={{ "font-size": "1.6rem", "font-weight": "600", "margin-bottom": "4px" }}>Welcome to Aegis Sync!</p>
+              <p style={{ "font-size": "1.6rem", "font-weight": "600", "margin-bottom": "4px" }}>Welcome to {APP_NAME}!</p>
               <p style={{ "font-size": "1.3rem", color: "var(--text-secondary)", "margin-bottom": "18px" }}>
                 Let's set a few things up before you get started.
               </p>
@@ -1082,10 +1111,12 @@ function App() {
                   <For each={profiles()}>
                     {(p) => {
                       const isActive = () => p.id === profile()?.id;
+                      const isSwitching = () => p.id === switchingProfileId();
                       return (
                         <button
                           class={`btn-profile${isActive() ? " btn-profile--active" : ""}`}
                           onClick={() => switchProfile(p.id)}
+                          disabled={switchingProfileId() !== undefined}
                           style={{
                             padding: "10px 12px",
                             display: "flex",
@@ -1096,7 +1127,7 @@ function App() {
                             "border-color": isActive() ? "var(--accent)" : "var(--border)",
                             "border-radius": "6px",
                             background: isActive() ? "var(--accent-dim)" : "var(--surface)",
-                            cursor: "pointer",
+                            cursor: switchingProfileId() !== undefined ? "default" : "pointer",
                             width: "100%",
                             color: "var(--text-primary)",
                             "font-weight": isActive() ? "500" : "400",
@@ -1104,7 +1135,12 @@ function App() {
                           }}
                         >
                           <span style={{ flex: "1", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", "min-width": "0" }}>{p.name}</span>
-                          <Show when={isActive()}>
+                          <Show when={isSwitching()}>
+                            <span class="btn-icon--spinning" style={{ display: "flex", color: "var(--accent)", "flex-shrink": "0" }}>
+                              <LoaderIcon />
+                            </span>
+                          </Show>
+                          <Show when={isActive() && !isSwitching()}>
                             <div style={{
                               width: "7px",
                               height: "7px",
@@ -1131,6 +1167,13 @@ function App() {
                     <p style={{ color: "var(--danger)", "font-size": "1.3rem", "margin-top": "5px" }}>{profileError()}</p>
                   </Show>
                 </Show>
+
+                <Show when={profiles().length > 1}>
+                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "margin-top": "8px", "font-size": "1.1rem", color: "var(--text-secondary)", "font-family": "'IBM Plex Mono', monospace", opacity: "0.7" }}>
+                    <ExpandVerticalIcon />
+                    <span>Alt+Shift+J / K to switch profiles</span>
+                  </div>
+                </Show>
               </div>
             </div>
           </Show>
@@ -1142,7 +1185,7 @@ function App() {
           <header style={panelHeader}>
             <button onClick={() => setView("main")} class="btn-icon" style={{ "margin-right": "6px" }}><BackIcon /></button>
             <span style={{ "font-size": "1.5rem", "font-weight": "600" }}>Settings</span>
-            <a href="https://github.com/sambehrens/bookmark-sync" target="_blank" rel="noopener noreferrer" class="btn-icon" style={{ "margin-left": "auto" }} title="View on GitHub"><GitHubIcon /></a>
+            <a href="https://github.com/sambehrens/vaultmarks" target="_blank" rel="noopener noreferrer" class="btn-icon" style={{ "margin-left": "auto" }} title="View on GitHub"><GitHubIcon /></a>
           </header>
 
           {/* Account */}
@@ -1434,12 +1477,20 @@ function App() {
                   <p style={{ "font-size": "1.3rem", color: "var(--text-secondary)", margin: "0 0 10px" }}>
                     This permanently deletes your account, all profiles, and all synced bookmarks from the server. Your local Chrome bookmarks are not affected.
                   </p>
+                  <input
+                    type="password"
+                    placeholder="Enter your password to confirm"
+                    value={deleteAccountPassword()}
+                    onInput={(e) => setDeleteAccountPassword(e.currentTarget.value)}
+                    disabled={deleteAccountLoading()}
+                    style={{ width: "100%", "box-sizing": "border-box", padding: "6px 8px", "margin-bottom": "8px", "border-radius": "4px", border: "1px solid var(--border)", background: "var(--bg-primary)", color: "var(--text-primary)", "font-size": "1.3rem" }}
+                  />
                   <Show when={deleteAccountError()}>
                     <p style={{ color: "var(--danger)", "font-size": "1.3rem", margin: "0 0 8px" }}>{deleteAccountError()}</p>
                   </Show>
                   <div style={{ display: "flex", gap: "8px" }}>
                     <button
-                      onClick={() => setDeleteAccountConfirm(false)}
+                      onClick={() => { setDeleteAccountConfirm(false); setDeleteAccountPassword(""); }}
                       disabled={deleteAccountLoading()}
                       style={{ flex: "1", padding: "7px", background: "none", border: "1px solid var(--border)", "border-radius": "6px", cursor: "pointer", color: "var(--text-primary)" }}
                     >

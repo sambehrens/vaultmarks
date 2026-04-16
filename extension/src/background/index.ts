@@ -61,6 +61,7 @@ import {
 } from "../bookmarks/bridge";
 import { AuthExpiredError } from "../sync/client";
 import type { ExtMessage, ExtResponse, ProfileInfo, PendingChanges, ImportDiff } from "../types";
+import { LOG_TAG, PENDING_IMPORT_KEY } from "../config";
 
 // ── Auth expiry ───────────────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ import type { ExtMessage, ExtResponse, ProfileInfo, PendingChanges, ImportDiff }
  * rather than leaving the extension in a silently broken state.
  */
 function onAuthExpired(): void {
-  console.warn("[aegis] JWT expired — logging out");
+  console.warn(`${LOG_TAG} JWT expired — logging out`);
   handleLogout().catch(console.error);
 }
 
@@ -91,9 +92,9 @@ let _pendingImport: { profileId: string; diff: ImportDiff } | null = null;
 function setPendingImport(value: { profileId: string; diff: ImportDiff } | null): void {
   _pendingImport = value;
   if (value) {
-    chrome.storage.session.set({ aegis_pendingImport: value });
+    chrome.storage.session.set({ [PENDING_IMPORT_KEY]: value });
   } else {
-    chrome.storage.session.remove("aegis_pendingImport");
+    chrome.storage.session.remove(PENDING_IMPORT_KEY);
   }
 }
 
@@ -124,26 +125,25 @@ initBrowserRoots().catch(console.error);
 restoreFromSessionStorage().then(async (restored) => {
   _resolveSessionReady(); // unblock GET_STATUS immediately
   if (!restored) {
+    setIcon("signedout");
     _resolveStartupComplete();
     return;
   }
   if (!isLocked()) {
     // Check if a pending import conflict was waiting for user input before the SW was killed.
-    const stored = await chrome.storage.session.get("aegis_pendingImport") as {
-      aegis_pendingImport?: { profileId: string; diff: ImportDiff };
-    };
-    if (stored.aegis_pendingImport) {
-      _pendingImport = stored.aegis_pendingImport;
-      console.log("[aegis] session restored with pending import conflict — waiting for user resolution");
+    const stored = await chrome.storage.session.get(PENDING_IMPORT_KEY) as Record<string, any>;
+    if (stored[PENDING_IMPORT_KEY]) {
+      _pendingImport = stored[PENDING_IMPORT_KEY];
+      console.log(`${LOG_TAG} session restored with pending import conflict — waiting for user resolution`);
       await initializeDocs(getActiveProfileId());
       // Do NOT startSync — the user must resolve the conflict first.
     } else {
-      console.log("[aegis] session fully restored from session storage");
+      console.log(`${LOG_TAG} session fully restored from session storage`);
       await initializeDocs(getActiveProfileId());
       startSync();
     }
   } else {
-    console.log("[aegis] session partially restored (locked) — key bytes missing");
+    console.log(`${LOG_TAG} session partially restored (locked) — key bytes missing`);
     setIconLocked(true);
     // Only push already-encrypted pending deltas (no key needed).
     // Don't open the WebSocket — incoming deltas require decryption.
@@ -160,6 +160,24 @@ restoreFromSessionStorage().then(async (restored) => {
   _resolveStartupComplete();
 });
 
+// ── Keyboard commands ─────────────────────────────────────────────────────────
+
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== "next-profile" && command !== "prev-profile") return;
+  await _sessionReady; // ensure session is restored if SW was sleeping
+  if (!isLoggedIn() || isLocked()) return;
+  const profiles = getProfiles();
+  if (profiles.length <= 1) return;
+  const currentIdx = profiles.findIndex((p) => p.id === getActiveProfileId());
+  const delta = command === "next-profile" ? 1 : -1;
+  const nextIdx = (currentIdx + delta + profiles.length) % profiles.length;
+  const result = await handleSwitchProfile(profiles[nextIdx].id);
+  if (result.type === "SWITCH_SUCCESS") {
+    // Notify the popup if it happens to be open so it can update immediately.
+    chrome.runtime.sendMessage({ type: "PROFILE_SWITCHED", profileId: profiles[nextIdx].id }).catch(() => {});
+  }
+});
+
 // ── Message handler ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener(
@@ -167,7 +185,7 @@ chrome.runtime.onMessage.addListener(
     handleMessage(message)
       .then(sendResponse)
       .catch((err: unknown) => {
-        console.error("[aegis] message handler error", err);
+        console.error(`${LOG_TAG} message handler error`, err);
       });
     return true; // keep channel open for async response
   },
@@ -221,7 +239,7 @@ async function handleMessage(msg: ExtMessage): Promise<ExtResponse> {
     case "EXPORT_PROFILE":
       return handleExportProfile(msg.profileId);
     case "DELETE_ACCOUNT":
-      return handleDeleteAccount();
+      return handleDeleteAccount(msg.authKey);
   }
 }
 
@@ -418,8 +436,33 @@ async function handleResolveImport(
 
   try {
     if (choice === "overwrite") {
-      // Server state is already in the Loro doc — just reconcile Chrome to match.
-      await persistSnapshot(originalProfileId);
+      const targetProfileId = opts.targetProfileId ?? originalProfileId;
+
+      if (targetProfileId !== originalProfileId) {
+        // User compared against a different profile and chose to overwrite Chrome
+        // with that profile's server state. Persist the original profile's snapshot
+        // first, then load and switch to the target profile.
+        await persistSnapshot(originalProfileId);
+
+        switchSessionProfile(targetProfileId);
+        await loadMapping(targetProfileId);
+        const targetSnapshot = await loadSnapshot(targetProfileId);
+        if (targetSnapshot) {
+          await initDoc(targetSnapshot);
+          resetVersionCursor();
+          const lastSeq: number = (await getMeta<number>(`lastSeqId-${targetProfileId}`)) ?? 0;
+          await syncFrom(targetProfileId, lastSeq, /* skipReconcile */ true, /* exclusive */ false);
+        } else {
+          await initDoc();
+          await syncFrom(targetProfileId, 0, /* skipReconcile */ true, /* exclusive */ false);
+        }
+
+        await persistSnapshot(targetProfileId);
+      } else {
+        // Server state is already in the Loro doc — just persist and reconcile.
+        await persistSnapshot(originalProfileId);
+      }
+
       await reconcileBookmarks();
       attachBookmarkListeners();
 
@@ -488,11 +531,10 @@ async function handleResolveImport(
 
     setIconLocked(false);
     startSync();
-    // When the user merged into a *different* profile the session has switched
+    // When the user resolved against a different profile the session has switched
     // to that profile; tell the popup so it can update its active-profile display.
-    const activeProfile = (choice === "merge" && (opts.targetProfileId ?? originalProfileId) !== originalProfileId)
-      ? getActiveProfile()
-      : undefined;
+    const switchedProfile = (opts.targetProfileId ?? originalProfileId) !== originalProfileId;
+    const activeProfile = switchedProfile ? getActiveProfile() : undefined;
     return { type: "RESOLVE_IMPORT_SUCCESS", activeProfile };
   } catch (err) {
     return { type: "RESOLVE_IMPORT_ERROR", error: err instanceof Error ? err.message : String(err) };
@@ -601,7 +643,7 @@ async function initializeDocs(
     // Try the server snapshot first; it avoids replaying every delta ever written.
     const encKey = getEncryptionKey();
     const serverSnapshot = await apiGetServerSnapshot(profileId).catch((err) => {
-      console.warn("[aegis] failed to fetch server snapshot, falling back to full delta replay", err);
+      console.warn(`${LOG_TAG} failed to fetch server snapshot, falling back to full delta replay`, err);
       return null;
     });
 
@@ -660,7 +702,7 @@ async function initializeDocs(
       const encryptedSnapshot = await encrypt(encKey, exportSnapshot());
       apiPutServerSnapshot(profileId, lastSeqAfterSync, encryptedSnapshot).catch((err) => {
         // Non-fatal: the next device will just do a full delta replay instead.
-        console.warn("[aegis] failed to upload initial snapshot to server", err);
+        console.warn(`${LOG_TAG} failed to upload initial snapshot to server`, err);
       });
     }
   }
@@ -689,7 +731,7 @@ let _syncInProgress = false;
  */
 async function syncFrom(profileId: string, sinceSeq: number, skipReconcile = false, exclusive = true): Promise<void> {
   if (exclusive && _syncInProgress) {
-    console.log(`[aegis] syncFrom: already in progress, skipping (profile=${profileId.slice(0,8)})`);
+    console.log(`${LOG_TAG} syncFrom: already in progress, skipping (profile=${profileId.slice(0,8)})`);
     return;
   }
   _syncInProgress = true;
@@ -702,7 +744,7 @@ async function syncFrom(profileId: string, sinceSeq: number, skipReconcile = fal
 
 async function _syncFromInner(profileId: string, sinceSeq: number, skipReconcile: boolean): Promise<void> {
   const deltas = await pullSince(sinceSeq, profileId);
-  console.log(`[aegis] syncFrom profile=${profileId.slice(0,8)} sinceSeq=${sinceSeq} → ${deltas.length} delta(s)`);
+  console.log(`${LOG_TAG} syncFrom profile=${profileId.slice(0,8)} sinceSeq=${sinceSeq} → ${deltas.length} delta(s)`);
   if (deltas.length === 0) {
     lastSynced = Date.now();
     return;
@@ -713,7 +755,7 @@ async function _syncFromInner(profileId: string, sinceSeq: number, skipReconcile
   // total WASM/Chrome API work — which causes a call-stack overflow when
   // hundreds of bookmarks arrive (e.g. after first sync with Vivaldi or Opera).
   for (const delta of deltas) {
-    console.log(`[aegis]   importing delta seq=${delta.sequenceId} bytes=${delta.payload.byteLength}`);
+    console.log(`${LOG_TAG}   importing delta seq=${delta.sequenceId} bytes=${delta.payload.byteLength}`);
     applyRemoteUpdateOnly(delta.payload);
   }
 
@@ -733,7 +775,7 @@ async function _syncFromInner(profileId: string, sinceSeq: number, skipReconcile
   // Keep the server snapshot current so new devices don't have to replay a long
   // delta tail. Fire-and-forget — failure just means a slightly staler snapshot.
   maybeUploadServerSnapshot(profileId, newSeq).catch((err) => {
-    console.warn("[aegis] server snapshot refresh failed (non-fatal)", err);
+    console.warn(`${LOG_TAG} server snapshot refresh failed (non-fatal)`, err);
   });
 }
 
@@ -748,7 +790,7 @@ async function maybeUploadServerSnapshot(profileId: string, currentSeq: number):
   const encryptedSnapshot = await encrypt(getEncryptionKey(), exportSnapshot());
   await apiPutServerSnapshot(profileId, currentSeq, encryptedSnapshot);
   await setMeta(`lastSnapshotUpload-${profileId}`, currentSeq);
-  console.log(`[aegis] server snapshot refreshed at seq=${currentSeq} for profile=${profileId.slice(0, 8)}`);
+  console.log(`${LOG_TAG} server snapshot refreshed at seq=${currentSeq} for profile=${profileId.slice(0, 8)}`);
 }
 
 async function persistSnapshot(profileId: string): Promise<void> {
@@ -793,7 +835,7 @@ function connectWebSocket(): void {
  */
 function startSync(): void {
   if (!getActiveProfileId()) {
-    console.warn("[aegis] startSync: profileId is invalid, skipping");
+    console.warn(`${LOG_TAG} startSync: profileId is invalid, skipping`);
     return;
   }
 
@@ -847,7 +889,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       computeOfflineChanges()
         .then(async (changes) => {
           if (changes.added > 0 || changes.removed > 0 || changes.modified > 0) {
-            console.log(`[aegis] poll detected local changes: +${changes.added} -${changes.removed} ~${changes.modified} — merging`);
+            console.log(`${LOG_TAG} poll detected local changes: +${changes.added} -${changes.removed} ~${changes.modified} — merging`);
             await mergeLocalChangesIntoDoc();
             await exportAndEnqueueLocalChanges();
             await persistSnapshot(profileId);
@@ -871,8 +913,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // ── Icon state ────────────────────────────────────────────────────────────────
 
-function setIconLocked(locked: boolean): void {
-  const suffix = locked ? "-locked" : "";
+type IconState = "default" | "locked" | "signedout";
+
+function setIcon(state: IconState): void {
+  const suffix = state === "default" ? "" : `-${state}`;
   chrome.action.setIcon({
     path: {
       "16":  `assets/icon${suffix}-16.png`,
@@ -880,6 +924,10 @@ function setIconLocked(locked: boolean): void {
       "128": `assets/icon${suffix}-128.png`,
     },
   });
+}
+
+function setIconLocked(locked: boolean): void {
+  setIcon(locked ? "locked" : "default");
 }
 
 // ── Lock ──────────────────────────────────────────────────────────────────────
@@ -940,16 +988,16 @@ async function handleLogout(clearBookmarks = false): Promise<ExtResponse> {
   if (clearBookmarks) {
     await clearManagedBookmarks();
   }
-  setIconLocked(false); // back to default (not logged in, not locked)
+  setIcon("signedout");
   return { type: "LOGOUT_SUCCESS" };
 }
 
 // ── Delete account ────────────────────────────────────────────────────────────
 
-async function handleDeleteAccount(): Promise<ExtResponse> {
+async function handleDeleteAccount(authKey: string): Promise<ExtResponse> {
   try {
     const jwt = getJwt();
-    await apiDeleteAccount(jwt);
+    await apiDeleteAccount(jwt, authKey);
     // Tear down active session exactly like logout, then wipe all local data.
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     chrome.alarms.clear("sync-poll");
@@ -957,7 +1005,7 @@ async function handleDeleteAccount(): Promise<ExtResponse> {
     detachBookmarkListeners();
     clearSession();
     await clearAllLocalData();
-    setIconLocked(false);
+    setIcon("signedout");
     return { type: "DELETE_ACCOUNT_SUCCESS" };
   } catch (err) {
     return { type: "DELETE_ACCOUNT_ERROR", error: String(err) };
@@ -969,13 +1017,13 @@ async function handleDeleteAccount(): Promise<ExtResponse> {
 async function handleSwitchProfile(profileId: string): Promise<ExtResponse> {
   if (isLocked()) return { type: "SWITCH_ERROR", error: "Session is locked." };
   try {
-    console.log(`[aegis] switchProfile → ${profileId.slice(0,8)}`);
+    console.log(`${LOG_TAG} switchProfile → ${profileId.slice(0,8)}`);
     switchSessionProfile(profileId);
     await initializeDocs(profileId, false); // don't merge: Chrome still shows previous profile
     startSync();
     return { type: "SWITCH_SUCCESS" };
   } catch (err) {
-    console.error("[aegis] switchProfile error", err);
+    console.error(`${LOG_TAG} switchProfile error`, err);
     return { type: "SWITCH_ERROR", error: String(err) };
   }
 }
@@ -1006,7 +1054,7 @@ async function handleSync(): Promise<ExtResponse> {
     if (hasEstablishedMapping()) {
       const changes = await computeOfflineChanges();
       if (changes.added > 0 || changes.removed > 0 || changes.modified > 0) {
-        console.log(`[aegis] sync detected local changes: +${changes.added} -${changes.removed} ~${changes.modified} — merging`);
+        console.log(`${LOG_TAG} sync detected local changes: +${changes.added} -${changes.removed} ~${changes.modified} — merging`);
         await mergeLocalChangesIntoDoc();
         await exportAndEnqueueLocalChanges();
         await persistSnapshot(profileId);
@@ -1086,5 +1134,5 @@ async function handleDeleteProfile(profileId: string): Promise<ExtResponse> {
 // ── Install ───────────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("[aegis] installed");
+  console.log(`${LOG_TAG} installed`);
 });
