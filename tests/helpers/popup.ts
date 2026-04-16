@@ -76,13 +76,14 @@ export class PopupHelper {
     await this.page.waitForSelector("input[type=email]:not([disabled])");
   }
 
-  async deleteAccount(): Promise<void> {
+  async deleteAccount(password = "test-password-123"): Promise<void> {
     await this.openSettings();
     await this.page.getByRole("button", { name: /account security/i }).click();
     await this.page.waitForSelector("text=Account Security");
     await this.page.click("text=Delete account and all data");
+    await this.page.fill('input[type=password][placeholder*="confirm"]', password);
     await this.page.getByRole("button", { name: "Permanently delete" }).click({ force: true });
-    await this.page.waitForSelector("input[type=email]:not([disabled])", { timeout: 15_000 });
+    await this.page.waitForSelector("input[type=email]:not([disabled])", { timeout: 30_000 });
   }
 
   async createProfile(name: string): Promise<void> {
@@ -126,6 +127,19 @@ export class PopupHelper {
 
   async getActiveProfileName(): Promise<string | null> {
     return this.page.locator(".btn-profile--active").textContent();
+  }
+
+  /** Retrieve a profile's ID by name via GET_STATUS (runs in the popup context). */
+  async getProfileId(name: string): Promise<string> {
+    return this.page.evaluate(
+      (n) =>
+        new Promise<string>((resolve) =>
+          chrome.runtime.sendMessage({ type: "GET_STATUS" }, (res: any) =>
+            resolve(res.profiles.find((p: any) => p.name === n)?.id ?? ""),
+          ),
+        ),
+      name,
+    );
   }
 
   // ── Import conflict: compare-with and diff reading ────────────────────────

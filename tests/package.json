@@ -1,5 +1,5 @@
 {
-  "name": "aegis-sync-tests",
+  "name": "vaultmarks-tests",
   "private": true,
   "scripts": {
     "test": "playwright test",

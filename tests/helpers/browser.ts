@@ -22,7 +22,7 @@ export const DELTA_ENQUEUE_WAIT = 500;
 // ── Gecko IDs & UUIDs ────────────────────────────────────────────────────────
 
 /** Must match browser_specific_settings.gecko.id in manifest.firefox.json */
-const FIREFOX_GECKO_ID = "aegis-sync@local";
+const FIREFOX_GECKO_ID = "vaultmarks@local";
 
 /**
  * Deterministic UUID pre-assigned via Firefox's extensions.webextensions.uuids
@@ -166,7 +166,7 @@ export async function launchFirefoxBrowser(extensionFirefoxDist: string): Promis
     await new Promise((r) => setTimeout(r, 500));
     try {
       const title = await page.evaluate(() => document.title);
-      if (title === "Aegis Sync") break;
+      if (title === "Vaultmarks") break;
     } catch {
       /* page context may not be ready yet */
     }
