@@ -6,7 +6,7 @@ export async function encrypt(key: CryptoKey, plaintext: Uint8Array): Promise<st
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
   const result = new Uint8Array(12 + ciphertext.byteLength);
-  result.set(iv, 0);
+  result.set(iv);
   result.set(new Uint8Array(ciphertext), 12);
   return toBase64(result);
 }
@@ -21,9 +21,14 @@ export async function decrypt(key: CryptoKey, blob: string): Promise<Uint8Array>
 }
 
 export function toBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
 }
 
 export function fromBase64(b64: string): Uint8Array {
-  return new Uint8Array([...atob(b64)].map((c) => c.charCodeAt(0)));
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }

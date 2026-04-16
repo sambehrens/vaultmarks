@@ -1,10 +1,10 @@
 {
-  "name": "aegis-sync-extension",
+  "name": "vaultmarks-extension",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite build --watch",
+    "dev": "vite build --watch --mode development",
     "build": "vite build",
     "build:firefox": "vite build && cp public/manifest.firefox.json dist/manifest.json",
     "lint": "tsc --noEmit"

@@ -5,15 +5,11 @@ import { enqueue, peekQueue, dequeue, type QueuedDelta } from "../storage/db";
 import { encrypt } from "../crypto/aes";
 import { getEncryptionKey, getActiveProfileId } from "../auth/session";
 
-function randomId(): string {
-  return crypto.randomUUID();
-}
-
 /** Encrypt a raw Loro delta and add it to the persistent queue. */
 export async function enqueueDelta(rawDelta: Uint8Array): Promise<void> {
   const encryptedDelta = await encrypt(getEncryptionKey(), rawDelta);
   const item: QueuedDelta = {
-    id: randomId(),
+    id: crypto.randomUUID(),
     profileId: getActiveProfileId(),
     encryptedDelta,
     timestamp: Date.now(),
@@ -27,6 +23,6 @@ export async function peek(limit = 50): Promise<QueuedDelta[]> {
 }
 
 /** Remove items from the queue after a successful push. */
-export async function acknowledge(ids: string[]): Promise<void> {
-  await dequeue(ids);
+export function acknowledge(ids: string[]): Promise<void> {
+  return dequeue(ids);
 }

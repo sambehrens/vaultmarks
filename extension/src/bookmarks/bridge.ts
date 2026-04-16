@@ -13,6 +13,7 @@
 //   importUpdate() → reconcile() → translate loroId → chromeId → mutate Chrome
 
 import { isIgnoring, withEchoFilter } from "./echo-filter";
+import { LOG_TAG } from "../config";
 import {
   setBookmark,
   deleteBookmark,
@@ -739,7 +740,7 @@ async function reconcile(): Promise<void> {
     if (node.children) treeQueue.push(...node.children);
   }
 
-  console.log(`[aegis] reconcile: desired=${Object.keys(desired).length} loro bookmarks, current=${Object.keys(current).length} chrome bookmarks, mapping=${_loroToChrome.size} entries`);
+  console.log(`${LOG_TAG} reconcile: desired=${Object.keys(desired).length} loro bookmarks, current=${Object.keys(current).length} chrome bookmarks, mapping=${_loroToChrome.size} entries`);
 
   await withEchoFilter(async () => {
     // 0. Purge stale mapping entries — loroId → chromeId pairs where the Chrome
@@ -827,7 +828,7 @@ async function reconcile(): Promise<void> {
       if (deletedChromeIds.has(chromeId)) continue; // already removed by a parent's removeTree
       const loroId = _chromeToLoro.get(chromeId);
       if (loroId && effectiveDesired[loroId]) continue; // should keep this one
-      console.log(`[aegis] reconcile step1: deleting chrome=${chromeId} title="${current[chromeId]?.title}" (loroId=${loroId ?? "unmapped"})`);
+      console.log(`${LOG_TAG} reconcile step1: deleting chrome=${chromeId} title="${current[chromeId]?.title}" (loroId=${loroId ?? "unmapped"})`);
       await chrome.bookmarks.removeTree(chromeId).catch(() => {});
       deletedChromeIds.add(chromeId);
       // Clean up mapping for all descendants (they were implicitly removed).
@@ -849,7 +850,7 @@ async function reconcile(): Promise<void> {
       alreadyMapped,
     );
 
-    console.log(`[aegis] reconcile step2: ${toCreate.length} bookmark(s) to create`);
+    console.log(`${LOG_TAG} reconcile step2: ${toCreate.length} bookmark(s) to create`);
     for (const [loroId, node] of toCreate) {
       const parentChromeId = loroParentToChrome(node.parentId);
       // Skip bookmarks whose parent cannot be created in Chrome:
@@ -858,17 +859,17 @@ async function reconcile(): Promise<void> {
       // Both cases arise from browser-specific folders (e.g. Vivaldi's "Trash")
       // that got bootstrapped from another device but don't exist in Chrome.
       if (!isValidChromeParentId(parentChromeId)) {
-        console.warn(`[aegis] reconcile step2: skipping "${node.title}" — parentChrome "${parentChromeId}" is not a valid Chrome parent ID`);
+        console.warn(`${LOG_TAG} reconcile step2: skipping "${node.title}" — parentChrome "${parentChromeId}" is not a valid Chrome parent ID`);
         continue;
       }
-      console.log(`[aegis] reconcile step2: creating loroId=${loroId.slice(0,8)} title="${node.title}" parentLoro=${node.parentId} → parentChrome=${parentChromeId}`);
+      console.log(`${LOG_TAG} reconcile step2: creating loroId=${loroId.slice(0,8)} title="${node.title}" parentLoro=${node.parentId} → parentChrome=${parentChromeId}`);
       const created = await chrome.bookmarks
         .create({ parentId: parentChromeId, title: node.title, url: node.url })
-        .catch((err) => { console.error(`[aegis] reconcile step2: create failed for "${node.title}":`, err); return null; });
+        .catch((err) => { console.error(`${LOG_TAG} reconcile step2: create failed for "${node.title}":`, err); return null; });
       if (created) {
         _loroToChrome.set(loroId, created.id);
         _chromeToLoro.set(created.id, loroId);
-        console.log(`[aegis] reconcile step2: created chrome=${created.id} for "${node.title}"`);
+        console.log(`${LOG_TAG} reconcile step2: created chrome=${created.id} for "${node.title}"`);
         // Save the mapping immediately after each create so that if the SW is
         // killed mid-loop, the next reconcile finds these bookmarks already mapped
         // and skips them rather than creating duplicates.

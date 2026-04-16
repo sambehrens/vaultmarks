@@ -2,11 +2,11 @@ This design document outlines the architecture for a high-performance, end-to-en
 
 # ---
 
-**Technical Design Document: Project "Aegis Sync"**
+**Technical Design Document: Project "Vaultmarks"**
 
 ## **1\. Project Overview**
 
-Aegis Sync is an open-source, cross-browser extension that synchronizes native bookmark bars using **CRDTs (Conflict-free Replicated Data Types)** for bulletproof merging and **E2EE** for absolute privacy.
+Vaultmarks is an open-source, cross-browser extension that synchronizes native bookmark bars using **CRDTs (Conflict-free Replicated Data Types)** for bulletproof merging and **E2EE** for absolute privacy.
 
 ### **Core Pillars**
 
@@ -46,7 +46,7 @@ The system consists of three main components: the **Browser Extension (Client)**
 
 ### **3.1 Encryption Workflow**
 
-Aegis Sync follows the Bitwarden strategy for key derivation:
+Vaultmarks follows the Bitwarden strategy for key derivation:
 
 1. **Master Password \+ Email** $\\xrightarrow{Argon2id}$ **Master Key**.  
 2. **Master Key** $\\xrightarrow{HKDF}$ **Auth Key** (sent to server) AND **Encryption Key** (kept in browser).  

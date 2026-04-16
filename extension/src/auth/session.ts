@@ -13,6 +13,7 @@
 //                           so the user sees the lock screen after a browser restart.
 
 import type { ProfileInfo, SessionTimeout } from "../types";
+import { LOG_TAG, STORAGE_KEYS } from "../config";
 
 interface Session {
   jwt: string;
@@ -27,7 +28,13 @@ interface Session {
 }
 
 // Keys written to chrome.storage.local (survive browser close).
-const LOCAL_KEYS = ["aegis_jwt", "aegis_email", "aegis_profiles", "aegis_activeProfileId", "aegis_protectedSymmetricKey"] as const;
+const LOCAL_KEYS = [
+  STORAGE_KEYS.jwt,
+  STORAGE_KEYS.email,
+  STORAGE_KEYS.profiles,
+  STORAGE_KEYS.activeProfileId,
+  STORAGE_KEYS.protectedSymmetricKey,
+];
 
 let _session: Session | null = null;
 let _sessionTimeout: SessionTimeout = "on_restart";
@@ -40,13 +47,13 @@ export function getSessionTimeout(): SessionTimeout {
 
 export function setSessionTimeout(value: SessionTimeout): void {
   _sessionTimeout = value;
-  chrome.storage.local.set({ aegis_sessionTimeout: value });
+  chrome.storage.local.set({ [STORAGE_KEYS.sessionTimeout]: value });
   if (value === "never" && _session?.encryptionKeyRaw) {
     // Persist key to local storage so it survives browser restarts.
-    chrome.storage.local.set({ aegis_encryptionKeyRaw: Array.from(_session.encryptionKeyRaw) });
+    chrome.storage.local.set({ [STORAGE_KEYS.encryptionKeyRaw]: Array.from(_session.encryptionKeyRaw) });
   } else if (value === "on_restart") {
     // Remove the persisted key — next browser restart will require password entry.
-    chrome.storage.local.remove("aegis_encryptionKeyRaw");
+    chrome.storage.local.remove(STORAGE_KEYS.encryptionKeyRaw);
   }
 }
 
@@ -73,29 +80,29 @@ export function setSession(s: {
     activeProfileId: s.activeProfileId,
   };
   chrome.storage.local.set({
-    aegis_jwt: s.jwt,
-    aegis_email: s.email,
-    aegis_profiles: s.profiles,
-    aegis_activeProfileId: s.activeProfileId,
-    aegis_protectedSymmetricKey: s.protectedSymmetricKey,
+    [STORAGE_KEYS.jwt]:                   s.jwt,
+    [STORAGE_KEYS.email]:                 s.email,
+    [STORAGE_KEYS.profiles]:              s.profiles,
+    [STORAGE_KEYS.activeProfileId]:       s.activeProfileId,
+    [STORAGE_KEYS.protectedSymmetricKey]: s.protectedSymmetricKey,
   });
   chrome.storage.session.set({ encryptionKeyRaw: Array.from(s.encryptionKeyRaw) });
   if (_sessionTimeout === "never") {
-    chrome.storage.local.set({ aegis_encryptionKeyRaw: Array.from(s.encryptionKeyRaw) });
+    chrome.storage.local.set({ [STORAGE_KEYS.encryptionKeyRaw]: Array.from(s.encryptionKeyRaw) });
   }
 }
 
 export function clearSession(): void {
   _session = null;
   chrome.storage.session.clear();
-  chrome.storage.local.remove([...LOCAL_KEYS, "aegis_encryptionKeyRaw"]);
+  chrome.storage.local.remove([...LOCAL_KEYS, STORAGE_KEYS.encryptionKeyRaw]);
 }
 
 /** Update the stored PSK after a successful password change (new wrapping key). */
 export function updateProtectedSymmetricKey(psk: string): void {
   if (!_session) throw new Error("Not logged in");
   _session.protectedSymmetricKey = psk;
-  chrome.storage.local.set({ aegis_protectedSymmetricKey: psk });
+  chrome.storage.local.set({ [STORAGE_KEYS.protectedSymmetricKey]: psk });
 }
 
 /**
@@ -108,7 +115,7 @@ export function lockSession(): void {
   _session.encryptionKey = null;
   _session.encryptionKeyRaw = undefined;
   chrome.storage.session.remove("encryptionKeyRaw");
-  chrome.storage.local.remove("aegis_encryptionKeyRaw");
+  chrome.storage.local.remove(STORAGE_KEYS.encryptionKeyRaw);
 }
 
 export function setEncryptionKey(key: CryptoKey, rawBytes: Uint8Array): void {
@@ -117,7 +124,7 @@ export function setEncryptionKey(key: CryptoKey, rawBytes: Uint8Array): void {
   _session.encryptionKeyRaw = rawBytes;
   chrome.storage.session.set({ encryptionKeyRaw: Array.from(rawBytes) });
   if (_sessionTimeout === "never") {
-    chrome.storage.local.set({ aegis_encryptionKeyRaw: Array.from(rawBytes) });
+    chrome.storage.local.set({ [STORAGE_KEYS.encryptionKeyRaw]: Array.from(rawBytes) });
   }
 }
 
@@ -127,22 +134,17 @@ export function setEncryptionKey(key: CryptoKey, rawBytes: Uint8Array): void {
  */
 export async function restoreFromSessionStorage(): Promise<boolean> {
   const local = await chrome.storage.local.get([
-    "aegis_jwt", "aegis_email", "aegis_profiles", "aegis_activeProfileId",
-    "aegis_sessionTimeout", "aegis_encryptionKeyRaw", "aegis_protectedSymmetricKey",
-  ]) as {
-    aegis_jwt?: string;
-    aegis_email?: string;
-    aegis_profiles?: ProfileInfo[];
-    aegis_activeProfileId?: string;
-    aegis_sessionTimeout?: SessionTimeout;
-    aegis_encryptionKeyRaw?: number[];
-    aegis_protectedSymmetricKey?: string;
-  };
+    STORAGE_KEYS.jwt, STORAGE_KEYS.email, STORAGE_KEYS.profiles,
+    STORAGE_KEYS.activeProfileId, STORAGE_KEYS.sessionTimeout,
+    STORAGE_KEYS.encryptionKeyRaw, STORAGE_KEYS.protectedSymmetricKey,
+  ]) as Record<string, any>;
 
   // Always load the timeout setting, even if not logged in.
-  _sessionTimeout = local.aegis_sessionTimeout ?? "on_restart";
+  _sessionTimeout = local[STORAGE_KEYS.sessionTimeout] ?? "on_restart";
 
-  if (!local.aegis_jwt || !local.aegis_email || !local.aegis_profiles || !local.aegis_activeProfileId || !local.aegis_protectedSymmetricKey) {
+  if (!local[STORAGE_KEYS.jwt] || !local[STORAGE_KEYS.email] ||
+      !local[STORAGE_KEYS.profiles] || !local[STORAGE_KEYS.activeProfileId] ||
+      !local[STORAGE_KEYS.protectedSymmetricKey]) {
     return false;
   }
 
@@ -153,7 +155,7 @@ export async function restoreFromSessionStorage(): Promise<boolean> {
 
   // Fall back to local storage if timeout is "never" (key survives browser restarts).
   const keyNumbers = session.encryptionKeyRaw ??
-    (_sessionTimeout === "never" ? local.aegis_encryptionKeyRaw : undefined);
+    (_sessionTimeout === "never" ? local[STORAGE_KEYS.encryptionKeyRaw] : undefined);
 
   let encryptionKey: CryptoKey | null = null;
   let encryptionKeyRaw: Uint8Array | undefined;
@@ -170,21 +172,21 @@ export async function restoreFromSessionStorage(): Promise<boolean> {
       );
       encryptionKeyRaw = bytes;
     } catch (err) {
-      console.warn("[aegis] encryptionKeyRaw could not be imported, falling back to locked state:", err);
+      console.warn(`${LOG_TAG} encryptionKeyRaw could not be imported, falling back to locked state:`, err);
       chrome.storage.session.remove("encryptionKeyRaw");
-      if (_sessionTimeout === "never") chrome.storage.local.remove("aegis_encryptionKeyRaw");
+      if (_sessionTimeout === "never") chrome.storage.local.remove(STORAGE_KEYS.encryptionKeyRaw);
     }
   }
 
   _session = {
-    jwt: local.aegis_jwt,
-    email: local.aegis_email,
+    jwt: local[STORAGE_KEYS.jwt],
+    email: local[STORAGE_KEYS.email],
     encryptionKey,
     encryptionKeyRaw,
-    protectedSymmetricKey: local.aegis_protectedSymmetricKey,
+    protectedSymmetricKey: local[STORAGE_KEYS.protectedSymmetricKey],
     userId: "",
-    profiles: local.aegis_profiles,
-    activeProfileId: local.aegis_activeProfileId,
+    profiles: local[STORAGE_KEYS.profiles],
+    activeProfileId: local[STORAGE_KEYS.activeProfileId],
   };
   return true;
 }
@@ -237,20 +239,20 @@ export function getActiveProfile(): ProfileInfo | undefined {
 export function addProfile(profile: ProfileInfo): void {
   if (!_session) throw new Error("Not logged in");
   _session.profiles = [..._session.profiles, profile];
-  chrome.storage.local.set({ aegis_profiles: _session.profiles });
+  chrome.storage.local.set({ [STORAGE_KEYS.profiles]: _session.profiles });
 }
 
 export function removeProfile(profileId: string): void {
   if (!_session) return;
   _session.profiles = _session.profiles.filter((p) => p.id !== profileId);
-  chrome.storage.local.set({ aegis_profiles: _session.profiles });
+  chrome.storage.local.set({ [STORAGE_KEYS.profiles]: _session.profiles });
 }
 
 /** Replace the full profiles list (e.g. after a server sync that added new profiles). */
 export function updateProfiles(profiles: ProfileInfo[]): void {
   if (!_session) return;
   _session.profiles = profiles;
-  chrome.storage.local.set({ aegis_profiles: profiles });
+  chrome.storage.local.set({ [STORAGE_KEYS.profiles]: profiles });
 }
 
 export function switchProfile(profileId: string): void {
@@ -259,5 +261,5 @@ export function switchProfile(profileId: string): void {
     throw new Error("Profile not found");
   }
   _session.activeProfileId = profileId;
-  chrome.storage.local.set({ aegis_activeProfileId: profileId });
+  chrome.storage.local.set({ [STORAGE_KEYS.activeProfileId]: profileId });
 }

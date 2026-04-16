@@ -3,7 +3,7 @@
 //   "deltaQueue" — encrypted deltas awaiting upload
 //   "loro"       — Loro document snapshots, keyed as "snapshot-{profileId}"
 
-const DB_NAME = "aegis-sync";
+import { DB_NAME } from "../config";
 const DB_VERSION = 1;
 
 export interface QueuedDelta {

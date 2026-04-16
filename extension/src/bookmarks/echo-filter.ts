@@ -1,18 +1,19 @@
-// Transaction mutex that prevents remote changes from triggering outgoing syncs.
-// When applying a remote op: set flag → mutate bookmarks API → reset flag.
-// The bookmark event listener checks this flag and discards the echo.
+// Reference-counted guard that prevents remote changes from triggering outgoing syncs.
+// When applying a remote op: increment depth → mutate bookmarks API → decrement depth.
+// The bookmark event listener checks isIgnoring() and discards the echo.
+// Using a counter (not a boolean) makes it safe when multiple async ops overlap.
 
-let ignoring = false;
+let ignoreDepth = 0;
 
 export function isIgnoring(): boolean {
-  return ignoring;
+  return ignoreDepth > 0;
 }
 
 export async function withEchoFilter(fn: () => Promise<void>): Promise<void> {
-  ignoring = true;
+  ignoreDepth++;
   try {
     await fn();
   } finally {
-    ignoring = false;
+    ignoreDepth--;
   }
 }

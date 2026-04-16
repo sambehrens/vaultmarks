@@ -27,15 +27,15 @@ export interface DerivedKeyMaterial {
  *
  * Pipeline:
  *   masterPassword + email → Argon2id → masterKeyBytes
- *   masterKeyBytes → HKDF("aegis-auth-v1")     → authKey (base64)
- *   masterKeyBytes → HKDF("aegis-wrapping-v1") → wrappingKeyBytes (Uint8Array)
+ *   masterKeyBytes → HKDF("bsync-auth-v1")     → authKey (base64)
+ *   masterKeyBytes → HKDF("bsync-wrapping-v1") → wrappingKeyBytes (Uint8Array)
  */
 export async function deriveKeys(masterPassword: string, email: string): Promise<DerivedKeyMaterial> {
   const enc = new TextEncoder();
 
   const masterKeyBytes = argon2id(
     enc.encode(masterPassword),
-    enc.encode(email.toLowerCase() + ":aegis-salt-v1"),
+    enc.encode(email.toLowerCase() + ":bsync-salt-v1"),
     ARGON2_PARAMS,
   );
 
@@ -43,12 +43,12 @@ export async function deriveKeys(masterPassword: string, email: string): Promise
 
   const [authKeyBits, wrappingKeyBits] = await Promise.all([
     crypto.subtle.deriveBits(
-      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: enc.encode("aegis-auth-v1") },
+      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: enc.encode("bsync-auth-v1") },
       keyMaterial,
       256,
     ),
     crypto.subtle.deriveBits(
-      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: enc.encode("aegis-wrapping-v1") },
+      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: enc.encode("bsync-wrapping-v1") },
       keyMaterial,
       256,
     ),
