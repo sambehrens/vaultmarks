@@ -32,9 +32,11 @@ export function exportSnapshot(): Uint8Array {
   return doc().exportSnapshot();
 }
 
+const EMPTY_SNAPSHOT = new LoroDoc().exportSnapshot();
+
 /** Export a snapshot of a fresh empty document (no ops). */
 export function exportEmptySnapshot(): Uint8Array {
-  return new LoroDoc().exportSnapshot();
+  return EMPTY_SNAPSHOT.slice();
 }
 
 /**

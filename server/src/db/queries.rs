@@ -85,22 +85,6 @@ pub async fn profile_belongs_to_user(
 
 // ── Deltas ───────────────────────────────────────────────────────────────────
 
-pub async fn insert_delta(
-    pool: &PgPool,
-    profile_id: Uuid,
-    encrypted_payload: &[u8],
-) -> sqlx::Result<Delta> {
-    sqlx::query_as::<_, Delta>(
-        "INSERT INTO deltas (profile_id, encrypted_payload)
-         VALUES ($1, $2)
-         RETURNING sequence_id, profile_id, encrypted_payload, created_at",
-    )
-    .bind(profile_id)
-    .bind(encrypted_payload)
-    .fetch_one(pool)
-    .await
-}
-
 /// Fetch up to 500 deltas after `since_seq` for a profile.
 /// Returns `(deltas, has_more)` where `has_more` signals a subsequent page is available.
 pub async fn fetch_deltas_since(
@@ -197,14 +181,6 @@ pub async fn rename_profile(
 pub async fn delete_profile(pool: &PgPool, profile_id: Uuid, user_id: Uuid) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM profiles WHERE id = $1 AND user_id = $2")
         .bind(profile_id)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-}
-
-pub async fn delete_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(pool)
         .await

@@ -68,6 +68,24 @@ test("user can sign out", async ({ popupPage }) => {
   await expect(popupPage.locator("input[type=email]:not([disabled])")).toBeVisible();
 });
 
+test("user can change password without being signed out", async ({ popupPage }) => {
+  const helper = new PopupHelper(popupPage);
+  const email = uniqueEmail();
+  const oldPassword = "test-password-123";
+  const newPassword = "new-password-456";
+
+  await helper.register(email, oldPassword);
+  await helper.changePassword(oldPassword, newPassword);
+
+  await helper.reload();
+  await helper.waitForMainView(30_000);
+
+  await helper.logout();
+  await helper.login(email, newPassword);
+
+  await expect(popupPage.locator(".btn-profile").first()).toBeVisible();
+});
+
 test("delete account: other browsers are signed out on next sync", async () => {
   const { extensionDist } = readState();
   const email = uniqueEmail();

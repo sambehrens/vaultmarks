@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vaultmarks Bookmark Syncing",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Zero-knowledge end-to-end encrypted, conflict-free, offline ready, cross-browser bookmark synchronization.",
   "browser_specific_settings": {
     "gecko": {
@@ -14,7 +14,7 @@
     "storage",
     "alarms"
   ],
-  "host_permissions": [],
+  "host_permissions": ["https://api.vaultmarks.com/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },

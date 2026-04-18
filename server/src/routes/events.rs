@@ -25,13 +25,42 @@ pub async fn handler(
     State(state): State<AppState>,
     Query(params): Query<EventsQuery>,
 ) -> Response {
-    let Ok(user_id) = verify_token(&params.token) else {
+    let Ok((user_id, token_ver)) = verify_token(&params.token) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let owned = queries::profile_belongs_to_user(&state.pool, params.profile_id, user_id)
+    // Match AuthUser's token_version check: reject JWTs whose embedded `ver`
+    // claim no longer matches the user's current token_version (e.g. after a
+    // password change on another device).
+    let current_ver: Option<i32> = match sqlx::query_scalar(
+        "SELECT token_version FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("events: failed to load token_version for user {user_id}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    match current_ver {
+        Some(v) if v == token_ver => {}
+        _ => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+
+    // Propagate DB errors as 500 instead of silently treating them as 403.
+    // A transient DB blip should not present as "account revoked" to the client.
+    let owned = match queries::profile_belongs_to_user(&state.pool, params.profile_id, user_id)
         .await
-        .unwrap_or(false);
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("events: profile_belongs_to_user failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     if !owned {
         return StatusCode::FORBIDDEN.into_response();

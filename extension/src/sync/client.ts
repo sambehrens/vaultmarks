@@ -15,6 +15,8 @@ export interface RawDelta {
 // ── Fetch with timeout ────────────────────────────────────────────────────────
 
 const FETCH_TIMEOUT_MS = 30_000;
+const SHORT_RECONNECT_MS = 5_000;
+const RECONNECT_ALARM_DELAY_MINUTES = 0.5;
 
 /**
  * fetch() wrapper that aborts the request after FETCH_TIMEOUT_MS (default 30s).
@@ -58,16 +60,29 @@ export class AccountRevokedError extends AuthExpiredError {
   }
 }
 
+export class InvalidCredentialsError extends Error {
+  constructor() {
+    super("invalid credentials");
+    this.name = "InvalidCredentialsError";
+  }
+}
+
+async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  let message = fallback;
+  try {
+    const body = await res.json() as { error?: string };
+    if (body.error) message = body.error;
+  } catch {
+    // Ignore non-JSON error bodies.
+  }
+  return message;
+}
+
 async function throwIfNotOk(res: Response, prefix: string): Promise<void> {
   if (res.ok) return;
   if (res.status === 401) throw new AuthExpiredError();
   if (res.status === 403) throw new AccountRevokedError();
-  let message = `${prefix}: ${res.status}`;
-  try {
-    const body = await res.json() as { error?: string };
-    if (body.error) message = body.error;
-  } catch { /* ignore parse errors */ }
-  throw new Error(message);
+  throw new Error(await readErrorMessage(res, `${prefix}: ${res.status}`));
 }
 
 export async function apiRegister(
@@ -99,6 +114,7 @@ export async function apiLogin(email: string, authKey: string): Promise<LoginRes
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, auth_hash: authKey }),
   });
+  if (res.status === 401) throw new InvalidCredentialsError();
   await throwIfNotOk(res, "login failed");
   const data = await res.json();
   return { token: data.token, profiles: data.profiles, protectedSymmetricKey: data.protected_symmetric_key };
@@ -158,7 +174,7 @@ export async function apiChangePassword(
   newAuthKey: string,
   newProtectedSymmetricKey: string,
   jwt: string,
-): Promise<void> {
+): Promise<{ token: string }> {
   const res = await fetchWithTimeout(`${API_BASE}/auth/change-password`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
@@ -169,6 +185,7 @@ export async function apiChangePassword(
     }),
   });
   await throwIfNotOk(res, "change password failed");
+  return res.json() as Promise<{ token: string }>;
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -214,23 +231,35 @@ export async function apiPutServerSnapshot(
 
 // ── Push ──────────────────────────────────────────────────────────────────────
 
-let _pushInProgress = false;
+let _pushChain: Promise<void> = Promise.resolve();
+let _pushPaused = false;
+
+export function isPushPaused(): boolean {
+  return _pushPaused;
+}
+
+export async function pausePushes(): Promise<void> {
+  _pushPaused = true;
+  await _pushChain.catch(() => {});
+}
+
+export function resumePushes(): void {
+  _pushPaused = false;
+}
 
 /**
  * Drains the local delta queue by pushing batches to the server.
  *
- * Guards against concurrent calls (e.g. from onLocalChange and the 60s alarm
- * firing simultaneously) which would peek the same batch and push duplicate
- * deltas, causing the server delta log to accumulate redundant rows.
+ * Serializes calls so overlapping triggers (e.g. onLocalChange and the 60s
+ * alarm firing together) never peek the same batch concurrently.
  */
-export async function pushPending(): Promise<void> {
-  if (_pushInProgress) return;
-  _pushInProgress = true;
-  try {
-    await _pushPendingInner();
-  } finally {
-    _pushInProgress = false;
+export function pushPending(): Promise<void> {
+  if (_pushPaused) {
+    return _pushChain.catch(() => {});
   }
+  const run = _pushChain.catch(() => {}).then(() => _pushPendingInner());
+  _pushChain = run.catch(() => {});
+  return run;
 }
 
 async function _pushPendingInner(): Promise<void> {
@@ -238,6 +267,9 @@ async function _pushPendingInner(): Promise<void> {
   if (batch.length === 0) return;
 
   const jwt = getJwt();
+  // Snapshot the active profile once for this drain. A 403 on a stale queued
+  // delta from a previously active profile should discard that item, not log
+  // out the session that has already switched away.
   const activeProfile = getActiveProfileId();
   console.log(`${LOG_TAG} pushPending: ${batch.length} delta(s), activeProfile=${activeProfile}`);
   const succeeded: string[] = [];
@@ -307,18 +339,26 @@ export interface SseConnection {
 /**
  * Open a Server-Sent Events stream for real-time sequence-ID notifications.
  * Uses fetch() + ReadableStream so it works in extension service workers where
- * EventSource is unavailable.  On disconnect, schedules a "ws-reconnect" alarm
- * (name kept for backward compat with existing installed instances) and calls
- * onReconnectNeeded.
+ * EventSource is unavailable. On disconnect, schedules a short in-memory retry
+ * and a "ws-reconnect" alarm fallback (name kept for backward compat with
+ * existing installed instances), then calls onReconnectNeeded when the short
+ * retry timer fires.
+ *
+ * onAuthExpired fires when the server rejects the stream with 401 or 403, which
+ * means the JWT is no longer valid (expired or the account was deleted). The
+ * stream stops and no reconnect is scheduled — the caller is expected to force
+ * a logout so the user is prompted to re-authenticate.
  */
 export function openEventStream(
   profileId: string,
   token: string,
   onNewSeq: OnNewSeq,
   onReconnectNeeded: () => void,
+  onAuthExpired: (err: AuthExpiredError) => void,
 ): SseConnection {
   let closed = false;
   const abortController = new AbortController();
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
   const url = `${API_BASE}/events?token=${encodeURIComponent(token)}&profile_id=${encodeURIComponent(profileId)}`;
 
@@ -329,6 +369,14 @@ export function openEventStream(
     } catch {
       // Aborted or network error.
       if (!closed) scheduleReconnect();
+      return;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      closed = true;
+      const err = response.status === 403 ? new AccountRevokedError() : new AuthExpiredError();
+      console.warn(`${LOG_TAG} sse: auth rejected (${response.status}) — forcing logout`);
+      onAuthExpired(err);
       return;
     }
 
@@ -375,8 +423,17 @@ export function openEventStream(
   const scheduleReconnect = () => {
     closed = true;
     console.log(`${LOG_TAG} sse closed, scheduling reconnect`);
-    chrome.alarms.create("ws-reconnect", { delayInMinutes: 1 / 12 }); // ~5 s
-    onReconnectNeeded();
+    if (reconnectTimer !== undefined) {
+      clearTimeout(reconnectTimer);
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      onReconnectNeeded();
+    }, SHORT_RECONNECT_MS);
+    // MV3 alarms are clamped to >=30 s in Chrome and >=60 s in Firefox, so use
+    // them only as a fallback in case the service worker unloads before the
+    // short in-memory reconnect timer fires.
+    chrome.alarms.create("ws-reconnect", { delayInMinutes: RECONNECT_ALARM_DELAY_MINUTES });
   };
 
   run().catch(() => {
@@ -387,6 +444,10 @@ export function openEventStream(
     get closed() { return closed; },
     close() {
       closed = true;
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
       abortController.abort();
     },
   };

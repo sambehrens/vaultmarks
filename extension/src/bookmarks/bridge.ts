@@ -24,7 +24,7 @@ import {
   type BookmarkNode,
 } from "../crdt/loro-doc";
 import { enqueueDelta } from "../sync/delta-queue";
-import { pushPending } from "../sync/client";
+import { isPushPaused, pushPending } from "../sync/client";
 import { getMeta, setMeta } from "../storage/db";
 import { getActiveProfileId } from "../auth/session";
 
@@ -205,7 +205,9 @@ async function onLocalChange(): Promise<void> {
   const delta = exportFrom(_lastVersion);
   _lastVersion = currentVersion();
   await enqueueDelta(delta);
-  pushPending().catch(console.error);
+  if (!isPushPaused()) {
+    pushPending().catch(console.error);
+  }
 }
 
 // ── Listener management ───────────────────────────────────────────────────────
@@ -829,7 +831,12 @@ async function reconcile(): Promise<void> {
       const loroId = _chromeToLoro.get(chromeId);
       if (loroId && effectiveDesired[loroId]) continue; // should keep this one
       console.log(`${LOG_TAG} reconcile step1: deleting chrome=${chromeId} title="${current[chromeId]?.title}" (loroId=${loroId ?? "unmapped"})`);
-      await chrome.bookmarks.removeTree(chromeId).catch(() => {});
+      try {
+        await chrome.bookmarks.removeTree(chromeId);
+      } catch (err) {
+        console.error(`${LOG_TAG} reconcile step1: removeTree failed for chrome=${chromeId}`, err);
+        continue;
+      }
       deletedChromeIds.add(chromeId);
       // Clean up mapping for all descendants (they were implicitly removed).
       for (const descId of allDescendants(chromeId)) {
@@ -984,7 +991,11 @@ export async function clearManagedBookmarks(): Promise<void> {
   for (const container of root.children ?? []) {
     if (!isAnyRootId(container.id)) continue; // skip browser-specific containers
     for (const child of container.children ?? []) {
-      await chrome.bookmarks.removeTree(child.id).catch(() => {});
+      try {
+        await chrome.bookmarks.removeTree(child.id);
+      } catch (err) {
+        console.error(`${LOG_TAG} clearManagedBookmarks: removeTree failed for chrome=${child.id}`, err);
+      }
     }
   }
 }

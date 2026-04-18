@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite build --watch --mode development",
-    "build": "vite build && cd dist && zip -r ../vaultmarks.zip .",
-    "build:firefox": "vite build && cp public/manifest.firefox.json dist/manifest.json && cd dist && zip -r ../vaultmarks-firefox.zip .",
+    "build": "vite build && find dist -name '.DS_Store' -delete && cd dist && zip -r ../vaultmarks.zip .",
+    "build:firefox": "vite build && cp public/manifest.firefox.json dist/manifest.json && find dist -name '.DS_Store' -delete && cd dist && zip -r ../vaultmarks-firefox.zip .",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

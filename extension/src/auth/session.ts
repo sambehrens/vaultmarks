@@ -105,6 +105,13 @@ export function updateProtectedSymmetricKey(psk: string): void {
   chrome.storage.local.set({ [STORAGE_KEYS.protectedSymmetricKey]: psk });
 }
 
+/** Swap the stored JWT after the server re-issues one (e.g. on password change). */
+export function updateJwt(jwt: string): void {
+  if (!_session) throw new Error("Not logged in");
+  _session.jwt = jwt;
+  chrome.storage.local.set({ [STORAGE_KEYS.jwt]: jwt });
+}
+
 /**
  * Lock the session: clear the encryption key from memory and from session
  * storage, but keep the JWT and profile metadata so the user only needs to

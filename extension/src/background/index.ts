@@ -25,6 +25,7 @@ import {
   getSessionTimeout,
   setSessionTimeout,
   updateProtectedSymmetricKey,
+  updateJwt,
 } from "../auth/session";
 import {
   apiLogin,
@@ -37,10 +38,14 @@ import {
   apiPutServerSnapshot,
   apiChangePassword,
   apiDeleteAccount,
+  pausePushes,
   pushPending,
   pullSince,
+  resumePushes,
   openEventStream,
   SseConnection,
+  AuthExpiredError,
+  InvalidCredentialsError,
 } from "../sync/client";
 import { enqueueDelta } from "../sync/delta-queue";
 import {
@@ -60,7 +65,6 @@ import {
   mergeImportIntoDoc,
   clearManagedBookmarks,
 } from "../bookmarks/bridge";
-import { AuthExpiredError } from "../sync/client";
 import type { ExtMessage, ExtResponse, ProfileInfo, PendingChanges, ImportDiff } from "../types";
 import { LOG_TAG, PENDING_IMPORT_KEY } from "../config";
 
@@ -121,10 +125,14 @@ const _startupComplete = new Promise<void>((r) => { _resolveStartupComplete = r;
 
 // Detect browser-specific bookmark root IDs (Firefox uses "toolbar_____" etc.
 // instead of Chrome's "1", "2", "3") before any bookmark operation.
-initBrowserRoots().catch(console.error);
+const _browserRootsReady = initBrowserRoots().catch((err) => {
+  console.error(err);
+  throw err;
+});
 
 restoreFromSessionStorage().then(async (restored) => {
   _resolveSessionReady(); // unblock GET_STATUS immediately
+  await _browserRootsReady;
   if (!restored) {
     setIcon("signedout");
     _resolveStartupComplete();
@@ -274,6 +282,9 @@ async function handleLogin(
       profiles = result.profiles;
       protectedSymmetricKey = result.protectedSymmetricKey;
     } catch (loginErr) {
+      if (!(loginErr instanceof InvalidCredentialsError)) {
+        throw loginErr;
+      }
       // Only attempt registration if the account genuinely doesn't exist yet.
       try {
         // Generate a random symmetric key — this is the actual data encryption key.
@@ -293,7 +304,7 @@ async function handleLogin(
         if (msg === "email already registered") {
           throw new Error("Incorrect email or password.");
         }
-        throw loginErr;
+        throw regErr;
       }
     }
 
@@ -337,6 +348,7 @@ async function handleLogin(
 
 async function handleUnlock(encryptionKeyBytes: Uint8Array): Promise<ExtResponse> {
   try {
+    await _browserRootsReady;
     const encryptionKey = await crypto.subtle.importKey(
       "raw",
       new Uint8Array(encryptionKeyBytes),
@@ -390,6 +402,7 @@ async function handleUnlock(encryptionKeyBytes: Uint8Array): Promise<ExtResponse
  * inside handleUnlock before pausing).
  */
 async function completeUnlockInit(profileId: string, applyLocalChanges: boolean): Promise<void> {
+  await _browserRootsReady;
   if (applyLocalChanges) {
     await mergeLocalChangesIntoDoc();
     // Enqueue the delta so offline changes reach the server.
@@ -437,6 +450,7 @@ async function handleResolveImport(
   setPendingImport(null);
 
   try {
+    await _browserRootsReady;
     if (choice === "overwrite") {
       const targetProfileId = opts.targetProfileId ?? originalProfileId;
 
@@ -512,19 +526,40 @@ async function handleResolveImport(
       const newProfile: ProfileInfo = { id: created.id, name: created.name };
       addProfile(newProfile);
 
-      // Switch session to new profile so enqueueDelta tags the delta correctly.
-      switchSessionProfile(created.id);
+      try {
+        // Switch session to new profile so enqueueDelta tags the delta correctly.
+        switchSessionProfile(created.id);
 
-      // Bootstrap a fresh Loro doc from Chrome's current bookmarks.
-      await loadMapping(created.id);   // loads empty mapping (profile is new)
-      await initDoc();                  // fresh empty doc
-      await bootstrapFromChrome(created.id);
-      await enqueueDelta(exportSnapshot());
-      await persistSnapshot(created.id);
+        // Bootstrap a fresh Loro doc from Chrome's current bookmarks.
+        await loadMapping(created.id);   // loads empty mapping (profile is new)
+        await initDoc();                  // fresh empty doc
+        await bootstrapFromChrome(created.id);
+        await enqueueDelta(exportSnapshot());
+        await persistSnapshot(created.id);
 
-      // Chrome already has the bookmarks — reconcile is a no-op.
-      await reconcileBookmarks();
-      attachBookmarkListeners();
+        // Chrome already has the bookmarks — reconcile is a no-op.
+        await reconcileBookmarks();
+        attachBookmarkListeners();
+      } catch (err) {
+        // Roll back the server-side profile so it doesn't count against the
+        // account's profile quota on retry. Best-effort — if the rollback also
+        // fails we surface the original error, not the rollback failure.
+        console.warn(`${LOG_TAG} new_profile setup failed after apiCreateProfile — rolling back server profile`, err);
+        switchSessionProfile(originalProfileId);
+        removeProfile(created.id);
+        await apiDeleteProfile(created.id, getJwt()).catch((rollbackErr) => {
+          console.error(`${LOG_TAG} failed to delete orphan profile ${created.id}`, rollbackErr);
+        });
+        await loadMapping(originalProfileId);
+        const originalSnapshot = await loadSnapshot(originalProfileId);
+        if (originalSnapshot) {
+          await initDoc(originalSnapshot);
+          resetVersionCursor();
+        } else {
+          await initDoc();
+        }
+        throw err;
+      }
 
       setIconLocked(false);
       startSync();
@@ -565,6 +600,7 @@ async function handleRecomputeImportDiff(profileId: string): Promise<ExtResponse
   const originalProfileId = _pendingImport.profileId;
 
   try {
+    await _browserRootsReady;
     // Load the comparison profile's server state without reconciling Chrome.
     await initDoc();
     await loadMapping(profileId);
@@ -611,6 +647,7 @@ async function initializeDocs(
   mergeOffline = true,
   checkImport = false,
 ): Promise<{ pendingImport?: ImportDiff; bootstrapped?: boolean }> {
+  await _browserRootsReady;
   // Load the local loroId ↔ chromeId mapping before any reconcile or listener.
   await loadMapping(profileId);
 
@@ -728,6 +765,7 @@ async function initializeDocs(
 // ── Sync helpers ──────────────────────────────────────────────────────────────
 
 let _syncInProgress = false;
+let _syncPaused = false;
 
 // True while a profile switch (handleSwitchProfile) is executing.  SSE/alarm
 // syncFrom callers check this and skip so they never race with a mid-switch
@@ -751,6 +789,10 @@ let _pendingSwitchProfileId: string | null = null;
  * Pass false only from init/unlock paths that must always run to completion.
  */
 async function syncFrom(profileId: string, sinceSeq: number, skipReconcile = false, exclusive = true): Promise<void> {
+  if (_syncPaused) {
+    console.log(`${LOG_TAG} syncFrom: paused for credential update`);
+    return;
+  }
   if (exclusive && (_switchInProgress || _syncInProgress)) {
     console.log(`${LOG_TAG} syncFrom: skipping (switching=${_switchInProgress} syncing=${_syncInProgress} profile=${profileId.slice(0,8)})`);
     return;
@@ -818,12 +860,30 @@ async function persistSnapshot(profileId: string): Promise<void> {
   await saveSnapshot(profileId, exportSnapshot());
 }
 
+function stopRealtimeSync(): void {
+  if (sse) {
+    sse.close();
+    sse = null;
+  }
+  chrome.alarms.clear("sync-poll");
+  chrome.alarms.clear("ws-reconnect");
+}
+
+async function waitForSyncIdle(): Promise<void> {
+  while (_syncInProgress || _switchInProgress) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 /** Open (or reopen) the SSE event stream for the active profile. */
 function connectEventStream(): void {
+  if (_syncPaused) return;
   const profileId = getActiveProfileId();
   const jwt = getJwt();
 
   if (!profileId) return;
+
+  chrome.alarms.clear("ws-reconnect");
 
   if (sse) {
     sse.close();
@@ -839,7 +899,10 @@ function connectEventStream(): void {
       });
     }
   }, () => {
-    // onReconnectNeeded: handled by the "ws-reconnect" alarm in openEventStream.
+    if (!isLoggedIn() || isLocked()) return;
+    if (!sse || sse.closed) connectEventStream();
+  }, () => {
+    onAuthExpired();
   });
 }
 
@@ -847,9 +910,12 @@ function connectEventStream(): void {
  * Full sync startup: open the SSE event stream, drain the push queue, and
  * (re)start the 60-second poll alarm. Only call this on login, unlock, profile
  * switch, and SW restart — NOT from the ws-reconnect alarm, which should call
- * connectEventStream() directly to avoid resetting the poll timer.
+ * connectEventStream() directly to avoid resetting the poll timer. Short
+ * reconnects use an in-memory timer while the service worker is awake; the
+ * alarm is only a >=30 s fallback if the worker unloads first.
  */
 function startSync(): void {
+  if (_syncPaused) return;
   if (!getActiveProfileId()) {
     console.warn(`${LOG_TAG} startSync: profileId is invalid, skipping`);
     return;
@@ -880,7 +946,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // and updates only arriving when the user manually opens the popup.
   await _startupComplete;
 
-  if (!isLoggedIn() || isLocked()) return;
+  if (!isLoggedIn() || isLocked() || _syncPaused) return;
 
   if (alarm.name === "ws-reconnect") {
     if (!sse || sse.closed) {
@@ -965,13 +1031,29 @@ async function handleChangePassword(
   newAuthKey: string,
   newProtectedSymmetricKey: string,
 ): Promise<ExtResponse> {
+  _syncPaused = true;
+  stopRealtimeSync();
   try {
-    await apiChangePassword(oldAuthKey, newAuthKey, newProtectedSymmetricKey, getJwt());
-    // Update the locally stored PSK so subsequent unlocks use the new wrapping key.
+    await pausePushes();
+    await waitForSyncIdle();
+    const { token } = await apiChangePassword(oldAuthKey, newAuthKey, newProtectedSymmetricKey, getJwt());
+    // Server bumps token_version on password change, invalidating every JWT
+    // issued before now (including this session's). Swap in the new JWT it
+    // returned so this device keeps working without a forced re-login.
+    updateJwt(token);
     updateProtectedSymmetricKey(newProtectedSymmetricKey);
     return { type: "CHANGE_PASSWORD_SUCCESS" };
   } catch (err) {
+    if (err instanceof AuthExpiredError) {
+      await handleLogout();
+    }
     return { type: "CHANGE_PASSWORD_ERROR", error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    resumePushes();
+    _syncPaused = false;
+    if (isLoggedIn() && !isLocked()) {
+      startSync();
+    }
   }
 }
 
@@ -1096,6 +1178,7 @@ async function handleSync(): Promise<ExtResponse> {
           await handleLogout();
           return { type: "LOGOUT_SUCCESS" };
         }
+        throw authErr;
       }
       return { type: "SYNC_ERROR", error: "Session is locked — please unlock to sync." };
     }

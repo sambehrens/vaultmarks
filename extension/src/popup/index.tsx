@@ -536,11 +536,17 @@ function App() {
     for (const children of Object.values(childrenOf)) {
       children.sort((a, b) => a[1].index - b[1].index);
     }
-    function renderNode(id: string, node: typeof bookmarks[string]): string {
+    function renderNode(id: string, node: typeof bookmarks[string], ancestors: Set<string>): string {
+      if (ancestors.has(id)) {
+        console.warn(`[Vaultmarks] export: cycle detected at bookmark ${id}`);
+        return "";
+      }
       if (node.type === "bookmark") {
         return `<DT><A HREF="${escapeHtml(node.url ?? "")}">${escapeHtml(node.title)}</A>\n`;
       }
-      const children = (childrenOf[id] ?? []).map(([cid, cn]) => renderNode(cid, cn)).join("");
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(id);
+      const children = (childrenOf[id] ?? []).map(([cid, cn]) => renderNode(cid, cn, nextAncestors)).join("");
       return `<DT><H3>${escapeHtml(node.title)}</H3>\n<DL><p>\n${children}</DL><p>\n`;
     }
     // Root nodes are those whose parentId is not itself a node in the map.
@@ -548,11 +554,27 @@ function App() {
       Object.values(bookmarks).map((n) => n.parentId).filter((pid) => !ids.has(pid)),
     )];
     return rootParentIds.flatMap((pid) =>
-      (childrenOf[pid] ?? []).map(([id, node]) => renderNode(id, node)),
+      (childrenOf[pid] ?? []).map(([id, node]) => renderNode(id, node, new Set())),
     ).join("");
   }
 
+  function confirmPersistentUnlock(): boolean {
+    return window.confirm(
+      "Selecting Never stores your encryption key on disk so Vaultmarks stays unlocked after browser restart. Continue?",
+    );
+  }
+
+  function changeOnboardingTimeout(value: SessionTimeout): void {
+    if (value === "never" && onboardingTimeout() !== "never" && !confirmPersistentUnlock()) {
+      return;
+    }
+    setOnboardingTimeout(value);
+  }
+
   async function changeSessionTimeout(value: SessionTimeout) {
+    if (value === "never" && sessionTimeout() !== "never" && !confirmPersistentUnlock()) {
+      return;
+    }
     setSessionTimeoutSignal(value);
     await send({ type: "SET_SESSION_TIMEOUT", value });
   }
@@ -1046,7 +1068,7 @@ function App() {
                       type="radio"
                       name="onboarding-timeout"
                       checked={onboardingTimeout() === "on_restart"}
-                      onChange={() => setOnboardingTimeout("on_restart")}
+                      onChange={() => changeOnboardingTimeout("on_restart")}
                       style={{ "margin-top": "2px" }}
                     />
                     <div>
@@ -1059,12 +1081,12 @@ function App() {
                       type="radio"
                       name="onboarding-timeout"
                       checked={onboardingTimeout() === "never"}
-                      onChange={() => setOnboardingTimeout("never")}
+                      onChange={() => changeOnboardingTimeout("never")}
                       style={{ "margin-top": "2px" }}
                     />
                     <div>
                       <div style={{ "font-size": "1.4rem", "font-weight": "500" }}>Never</div>
-                      <div style={{ "font-size": "1.2rem", color: "var(--text-secondary)" }}>Stay unlocked until you manually lock or sign out.</div>
+                      <div style={{ "font-size": "1.2rem", color: "var(--text-secondary)" }}>Stay unlocked until you manually lock or sign out. This stores your encryption key on disk.</div>
                     </div>
                   </label>
                 </div>
@@ -1406,18 +1428,18 @@ function App() {
                   </div>
                 </label>
                 <label style={{ display: "flex", "align-items": "flex-start", gap: "8px", cursor: "pointer" }}>
-                  <input
-                    type="radio"
-                    name="timeout"
-                    checked={sessionTimeout() === "never"}
-                    onChange={() => changeSessionTimeout("never")}
-                    style={{ "margin-top": "2px" }}
-                  />
-                  <div>
-                    <div style={{ "font-size": "1.4rem", "font-weight": "500" }}>Never</div>
-                    <div style={{ "font-size": "1.2rem", color: "var(--text-secondary)" }}>Stay unlocked until you manually lock or sign out.</div>
-                  </div>
-                </label>
+                    <input
+                      type="radio"
+                      name="timeout"
+                      checked={sessionTimeout() === "never"}
+                      onChange={() => changeSessionTimeout("never")}
+                      style={{ "margin-top": "2px" }}
+                    />
+                    <div>
+                      <div style={{ "font-size": "1.4rem", "font-weight": "500" }}>Never</div>
+                      <div style={{ "font-size": "1.2rem", color: "var(--text-secondary)" }}>Stay unlocked until you manually lock or sign out. This stores your encryption key on disk.</div>
+                    </div>
+                  </label>
               </div>
             </div>
 

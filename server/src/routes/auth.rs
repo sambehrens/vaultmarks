@@ -62,7 +62,8 @@ pub async fn register(
     let profile =
         queries::create_profile(&pool, user.id, &body.profile_name, &metadata_bytes).await?;
 
-    let token = issue_token(user.id)?;
+    // token_version starts at 0 for a fresh user (matches the column default).
+    let token = issue_token(user.id, 0)?;
 
     Ok(Json(RegisterResponse {
         token,
@@ -109,7 +110,12 @@ pub async fn login(
 
     let profiles = queries::find_profiles_by_user(&pool, user.id).await?;
 
-    let token = issue_token(user.id)?;
+    let token_version: i32 = sqlx::query_scalar("SELECT token_version FROM users WHERE id = $1")
+        .bind(user.id)
+        .fetch_one(&pool)
+        .await?;
+
+    let token = issue_token(user.id, token_version)?;
 
     Ok(Json(LoginResponse {
         token,
@@ -135,11 +141,18 @@ pub struct ChangePasswordRequest {
     pub new_protected_symmetric_key: String,
 }
 
+#[derive(Serialize)]
+pub struct ChangePasswordResponse {
+    /// Fresh JWT carrying the bumped token_version. The client must replace its
+    /// stored JWT with this one; its old JWT now fails at AuthUser extraction.
+    pub token: String,
+}
+
 pub async fn change_password(
     State(pool): State<PgPool>,
     AuthUser(user_id): AuthUser,
     Json(body): Json<ChangePasswordRequest>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<ChangePasswordResponse>, AppError> {
     // Wrap the entire read-verify-write in a transaction with SELECT FOR UPDATE
     // to eliminate the TOCTOU race between concurrent password change requests.
     let mut tx = pool.begin().await?;
@@ -155,18 +168,20 @@ pub async fn change_password(
     verify_auth_key(&body.old_auth_hash, &stored_hash).await?;
 
     let new_stored_hash = hash_auth_key(&body.new_auth_hash).await?;
-    sqlx::query(
-        "UPDATE users SET auth_hash = $1, protected_symmetric_key = $2 WHERE id = $3",
+    let new_version: i32 = sqlx::query_scalar(
+        "UPDATE users SET auth_hash = $1, protected_symmetric_key = $2, \
+         token_version = token_version + 1 WHERE id = $3 RETURNING token_version",
     )
     .bind(&new_stored_hash)
     .bind(&body.new_protected_symmetric_key)
     .bind(user_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
-    Ok(StatusCode::NO_CONTENT)
+    let token = issue_token(user_id, new_version)?;
+    Ok(Json(ChangePasswordResponse { token }))
 }
 
 // ── Delete account ────────────────────────────────────────────────────────────
@@ -183,17 +198,24 @@ pub async fn delete_account(
     AuthUser(user_id): AuthUser,
     Json(body): Json<DeleteAccountRequest>,
 ) -> Result<StatusCode, AppError> {
+    let mut tx = pool.begin().await?;
+
     let stored_hash = sqlx::query_scalar::<_, String>(
-        "SELECT auth_hash FROM users WHERE id = $1",
+        "SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE",
     )
     .bind(user_id)
-    .fetch_optional(&pool)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::Unauthorized)?;
 
     verify_auth_key(&body.auth_hash, &stored_hash).await?;
 
-    queries::delete_user(&pool, user_id).await?;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

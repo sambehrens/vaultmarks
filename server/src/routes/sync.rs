@@ -37,15 +37,30 @@ pub async fn push(
         .decode(&body.encrypted_delta)
         .map_err(|_| AppError::BadRequest("invalid base64 for encrypted_delta".into()))?;
 
-    let delta = queries::insert_delta(&pool, body.profile_id, &payload).await?;
+    // Atomic insert + notify: if either fails the whole push fails, so the
+    // client never sees a sequence_id for a delta that subscribers weren't
+    // told about. (Postgres delivers NOTIFY payloads on COMMIT — issuing the
+    // two statements in the same tx ensures subscribers only hear about
+    // deltas that were actually committed.)
+    let mut tx = pool.begin().await?;
 
-    // Notify any WebSocket listeners watching this profile.
-    // Payload format: "{profile_id}:{sequence_id}"
+    let delta = sqlx::query_as::<_, crate::models::Delta>(
+        "INSERT INTO deltas (profile_id, encrypted_payload)
+         VALUES ($1, $2)
+         RETURNING sequence_id, profile_id, encrypted_payload, created_at",
+    )
+    .bind(body.profile_id)
+    .bind(&payload)
+    .fetch_one(&mut *tx)
+    .await?;
+
     let notify_payload = format!("{}:{}", body.profile_id, delta.sequence_id);
     sqlx::query("SELECT pg_notify('deltas', $1)")
         .bind(&notify_payload)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     Ok(Json(PushResponse {
         sequence_id: delta.sequence_id,

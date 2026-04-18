@@ -72,7 +72,7 @@ export class PopupHelper {
 
   async logout(): Promise<void> {
     await this.openSettings();
-    await this.page.click("text=Sign out");
+    await this.page.getByRole("button", { name: /^sign out$/i }).click({ force: true });
     await this.page.waitForSelector("input[type=email]:not([disabled])");
   }
 
@@ -84,6 +84,17 @@ export class PopupHelper {
     await this.page.fill('input[type=password][placeholder*="confirm"]', password);
     await this.page.getByRole("button", { name: "Permanently delete" }).click({ force: true });
     await this.page.waitForSelector("input[type=email]:not([disabled])", { timeout: 30_000 });
+  }
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.openSettings();
+    await this.page.getByRole("button", { name: /account security/i }).click();
+    await this.page.waitForSelector("text=Account Security");
+    await this.page.fill('input[placeholder="Current password"]', currentPassword);
+    await this.page.fill('input[placeholder="New password"]', newPassword);
+    await this.page.fill('input[placeholder="Confirm new password"]', newPassword);
+    await this.page.getByRole("button", { name: "Change password" }).click({ force: true });
+    await this.page.waitForSelector("text=Password changed successfully.", { timeout: 30_000 });
   }
 
   async createProfile(name: string): Promise<void> {

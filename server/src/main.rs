@@ -2,7 +2,10 @@ mod auth;
 mod db;
 mod error;
 mod models;
+mod rate_limit;
 mod routes;
+
+use std::net::SocketAddr;
 
 use axum::{
     body::Body,
@@ -32,6 +35,7 @@ pub struct AppState {
     pub pool: PgPool,
     /// Shared sender — WebSocket handlers call `.subscribe()` to get a receiver.
     pub notify_tx: NotifyTx,
+    pub rate_limit: rate_limit::RateLimitState,
 }
 
 /// Allows existing route handlers that extract `State(pool): State<PgPool>`
@@ -70,7 +74,14 @@ async fn main() -> anyhow::Result<()> {
     // Spawn the single shared PgListener task.
     tokio::spawn(run_pg_listener(pool.clone(), notify_tx.clone()));
 
-    let state = AppState { pool, notify_tx };
+    let rate_limit_state = rate_limit::new_state();
+    tokio::spawn(rate_limit::run_cleanup(rate_limit_state.clone()));
+
+    let state = AppState {
+        pool,
+        notify_tx,
+        rate_limit: rate_limit_state,
+    };
 
     // Body limits: tight for auth/profile metadata (16 KB), moderate for sync
     // push/pull (2 MB), larger for snapshot uploads (10 MB). Applied per-group
@@ -80,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/change-password", post(routes::auth::change_password))
         .route("/auth/account", delete(routes::auth::delete_account))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::auth_rate_limit,
+        ))
         .layer(DefaultBodyLimit::max(16 * 1024)); // 16 KB
 
     let profile_routes = Router::new()
@@ -136,7 +151,11 @@ async fn main() -> anyhow::Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

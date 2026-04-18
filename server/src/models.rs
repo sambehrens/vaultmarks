@@ -38,4 +38,25 @@ pub struct Delta {
 pub struct Claims {
     pub sub: Uuid, // user_id
     pub exp: usize,
+    /// Token version — bumped on password change so old JWTs stop validating.
+    #[serde(default)]
+    pub ver: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Claims;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn legacy_claims_default_version_to_zero() {
+        let claims: Claims = serde_json::from_value(json!({
+            "sub": Uuid::nil(),
+            "exp": 123usize,
+        }))
+        .expect("legacy claims should deserialize");
+
+        assert_eq!(claims.ver, 0);
+    }
 }
