@@ -178,7 +178,11 @@ pub async fn put_snapshot(
     // a client from uploading a fabricated high seq that starves new-device pulls.
     let max_seq = queries::max_sequence_id(&pool, body.profile_id).await?;
     match max_seq {
-        None => return Err(AppError::BadRequest("no deltas exist for this profile".into())),
+        None => {
+            return Err(AppError::BadRequest(
+                "no deltas exist for this profile".into(),
+            ))
+        }
         Some(max) if body.snapshot_seq > max => {
             return Err(AppError::BadRequest(
                 "snapshot_seq exceeds the latest committed delta".into(),

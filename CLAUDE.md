@@ -35,7 +35,7 @@ cargo check
 cargo clippy -- -D warnings
 
 # Run unit tests (no DB needed)
-cargo test --lib
+cargo test
 
 # Format
 cargo fmt

@@ -42,12 +42,33 @@ pub async fn register(
 ) -> Result<Json<RegisterResponse>, AppError> {
     let email = body.email.to_lowercase();
 
+    // Validate all input before writing anything. A user row committed without
+    // its initial profile would permanently block re-registration of the email.
+    let profile_name = body.profile_name.trim();
+    if profile_name.is_empty() {
+        return Err(AppError::BadRequest("profile name cannot be empty".into()));
+    }
+    let metadata_bytes = B64.decode(&body.encrypted_profile_metadata).map_err(|_| {
+        AppError::BadRequest("invalid base64 for encrypted_profile_metadata".into())
+    })?;
+
     if queries::find_user_by_email(&pool, &email).await?.is_some() {
         return Err(AppError::BadRequest("email already registered".into()));
     }
 
     let stored_hash = hash_auth_key(&body.auth_hash).await?;
-    let user = match queries::create_user(&pool, &email, &stored_hash, &body.protected_symmetric_key).await {
+
+    // User + initial profile are created atomically: if the profile insert
+    // fails the user row is rolled back too.
+    let mut tx = pool.begin().await?;
+    let user = match queries::create_user(
+        &mut *tx,
+        &email,
+        &stored_hash,
+        &body.protected_symmetric_key,
+    )
+    .await
+    {
         Ok(u) => u,
         Err(sqlx::Error::Database(e)) if e.constraint() == Some("users_email_key") => {
             return Err(AppError::BadRequest("email already registered".into()));
@@ -55,12 +76,8 @@ pub async fn register(
         Err(e) => return Err(AppError::from(e)),
     };
 
-    let metadata_bytes = B64.decode(&body.encrypted_profile_metadata).map_err(|_| {
-        AppError::BadRequest("invalid base64 for encrypted_profile_metadata".into())
-    })?;
-
-    let profile =
-        queries::create_profile(&pool, user.id, &body.profile_name, &metadata_bytes).await?;
+    let profile = queries::create_profile(&mut *tx, user.id, profile_name, &metadata_bytes).await?;
+    tx.commit().await?;
 
     // token_version starts at 0 for a fresh user (matches the column default).
     let token = issue_token(user.id, 0)?;
@@ -157,13 +174,12 @@ pub async fn change_password(
     // to eliminate the TOCTOU race between concurrent password change requests.
     let mut tx = pool.begin().await?;
 
-    let stored_hash = sqlx::query_scalar::<_, String>(
-        "SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(AppError::Unauthorized)?;
+    let stored_hash =
+        sqlx::query_scalar::<_, String>("SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
 
     verify_auth_key(&body.old_auth_hash, &stored_hash).await?;
 
@@ -200,13 +216,12 @@ pub async fn delete_account(
 ) -> Result<StatusCode, AppError> {
     let mut tx = pool.begin().await?;
 
-    let stored_hash = sqlx::query_scalar::<_, String>(
-        "SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(AppError::Unauthorized)?;
+    let stored_hash =
+        sqlx::query_scalar::<_, String>("SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
 
     verify_auth_key(&body.auth_hash, &stored_hash).await?;
 
@@ -227,8 +242,10 @@ async fn hash_auth_key(auth_key: &str) -> Result<String, AppError> {
         let salt = SaltString::generate(&mut OsRng);
         // In TEST_MODE use minimal params so integration tests don't time out
         // waiting for server-side Argon2id (which can be very slow in Docker on Mac).
-        let argon2 = if std::env::var("TEST_MODE").is_ok() {
-            tracing::warn!("TEST_MODE is active — using weak Argon2id params. Do NOT use in production.");
+        let argon2 = if crate::is_test_mode() {
+            tracing::warn!(
+                "TEST_MODE is active — using weak Argon2id params. Do NOT use in production."
+            );
             Argon2::new(
                 argon2::Algorithm::Argon2id,
                 argon2::Version::V0x13,

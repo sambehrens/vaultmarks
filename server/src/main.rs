@@ -46,6 +46,17 @@ impl FromRef<AppState> for PgPool {
     }
 }
 
+/// True only when `TEST_MODE` is explicitly `true` or `1`. Merely being set
+/// (e.g. `TEST_MODE=false` or empty) must not weaken Argon2 or disable rate
+/// limiting in production.
+pub fn is_test_mode() -> bool {
+    parse_test_mode(std::env::var("TEST_MODE").ok().as_deref())
+}
+
+fn parse_test_mode(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some(v) if v.eq_ignore_ascii_case("true") || v == "1")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -98,8 +109,14 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(16 * 1024)); // 16 KB
 
     let profile_routes = Router::new()
-        .route("/profiles", get(routes::profiles::list).post(routes::profiles::create))
-        .route("/profiles/{id}", patch(routes::profiles::rename).delete(routes::profiles::delete))
+        .route(
+            "/profiles",
+            get(routes::profiles::list).post(routes::profiles::create),
+        )
+        .route(
+            "/profiles/{id}",
+            patch(routes::profiles::rename).delete(routes::profiles::delete),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024)); // 16 KB
 
     let sync_routes = Router::new()
@@ -108,7 +125,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
 
     let snapshot_routes = Router::new()
-        .route("/sync/snapshot", get(routes::sync::get_snapshot).put(routes::sync::put_snapshot))
+        .route(
+            "/sync/snapshot",
+            get(routes::sync::get_snapshot).put(routes::sync::put_snapshot),
+        )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB
 
     let app = Router::new()
@@ -135,7 +155,11 @@ async fn main() -> anyhow::Result<()> {
                     let redacted = query
                         .split('&')
                         .map(|pair| {
-                            if pair.starts_with("token=") { "token=[redacted]" } else { pair }
+                            if pair.starts_with("token=") {
+                                "token=[redacted]"
+                            } else {
+                                pair
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join("&");
@@ -184,8 +208,12 @@ async fn run_pg_listener(pool: PgPool, tx: NotifyTx) {
         loop {
             match listener.recv().await {
                 Ok(n) => match parse_notify(n.payload()) {
-                    Some(msg) => { let _ = tx.send(msg); }
-                    None => tracing::warn!("pg_listener: malformed NOTIFY payload: {:?}", n.payload()),
+                    Some(msg) => {
+                        let _ = tx.send(msg);
+                    }
+                    None => {
+                        tracing::warn!("pg_listener: malformed NOTIFY payload: {:?}", n.payload())
+                    }
                 },
                 Err(e) => {
                     tracing::error!("pg_listener: recv error: {e} — reconnecting");
@@ -202,4 +230,20 @@ async fn run_pg_listener(pool: PgPool, tx: NotifyTx) {
 fn parse_notify(payload: &str) -> Option<(Uuid, i64)> {
     let (pid, seq) = payload.split_once(':')?;
     Some((pid.parse().ok()?, seq.parse().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_test_mode;
+
+    #[test]
+    fn test_mode_requires_explicit_true() {
+        assert!(parse_test_mode(Some("true")));
+        assert!(parse_test_mode(Some("TRUE")));
+        assert!(parse_test_mode(Some("1")));
+        assert!(!parse_test_mode(None));
+        assert!(!parse_test_mode(Some("")));
+        assert!(!parse_test_mode(Some("false")));
+        assert!(!parse_test_mode(Some("0")));
+    }
 }

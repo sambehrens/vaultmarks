@@ -1,5 +1,5 @@
 use crate::models::{Delta, Profile, User};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 // ── Users ────────────────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ pub async fn find_user_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Opti
 }
 
 pub async fn create_user(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     email: &str,
     auth_hash: &str,
     protected_symmetric_key: &str,
@@ -26,15 +26,14 @@ pub async fn create_user(
     .bind(email)
     .bind(auth_hash)
     .bind(protected_symmetric_key)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
 }
-
 
 // ── Profiles ─────────────────────────────────────────────────────────────────
 
 pub async fn create_profile(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     user_id: Uuid,
     name: &str,
     encrypted_metadata: &[u8],
@@ -47,7 +46,7 @@ pub async fn create_profile(
     .bind(user_id)
     .bind(name)
     .bind(encrypted_metadata)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
 }
 

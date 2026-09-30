@@ -13,7 +13,11 @@ fn jwt_secret() -> String {
 
 pub fn issue_token(user_id: Uuid, token_version: i32) -> anyhow::Result<String> {
     let exp = (chrono::Utc::now() + chrono::TimeDelta::days(30)).timestamp() as usize;
-    let claims = Claims { sub: user_id, exp, ver: token_version };
+    let claims = Claims {
+        sub: user_id,
+        exp,
+        ver: token_version,
+    };
     let token = encode(
         &Header::default(),
         &claims,

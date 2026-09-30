@@ -778,6 +778,12 @@ let _switchInProgress = false;
 // without running any two concurrently.
 let _pendingSwitchProfileId: string | null = null;
 
+// Set when a reactive syncFrom (SSE notification, poll) is skipped because
+// another sync is already running. That running sync may have pulled before
+// the new delta was committed, so one catch-up pull runs once it finishes —
+// otherwise the delta would wait for the next 60 s poll.
+let _resyncRequested = false;
+
 /**
  * Pull deltas from `sinceSeq`, apply them to the Loro doc, persist the
  * snapshot, and (unless skipReconcile) reconcile Chrome.
@@ -795,6 +801,9 @@ async function syncFrom(profileId: string, sinceSeq: number, skipReconcile = fal
   }
   if (exclusive && (_switchInProgress || _syncInProgress)) {
     console.log(`${LOG_TAG} syncFrom: skipping (switching=${_switchInProgress} syncing=${_syncInProgress} profile=${profileId.slice(0,8)})`);
+    // A profile switch re-pulls and reopens the stream itself; only a
+    // concurrent sync can leave the skipped notification unserviced.
+    if (!_switchInProgress) _resyncRequested = true;
     return;
   }
   _syncInProgress = true;
@@ -802,7 +811,26 @@ async function syncFrom(profileId: string, sinceSeq: number, skipReconcile = fal
     await _syncFromInner(profileId, sinceSeq, skipReconcile);
   } finally {
     _syncInProgress = false;
+    if (_resyncRequested) {
+      _resyncRequested = false;
+      runCatchUpSync();
+    }
   }
+}
+
+/** Pull anything committed since the last sync for the active profile. */
+function runCatchUpSync(): void {
+  if (!isLoggedIn() || isLocked() || _syncPaused || _switchInProgress) return;
+  // Don't reconcile Chrome while the user is still deciding how to resolve
+  // an import conflict or offline changes.
+  if (_pendingImport || _pendingChanges) return;
+  const profileId = getActiveProfileId();
+  getMeta<number>(`lastSeqId-${profileId}`)
+    .then((seq) => syncFrom(profileId, seq ?? 0))
+    .catch((err) => {
+      if (err instanceof AuthExpiredError) { onAuthExpired(); return; }
+      console.error(err);
+    });
 }
 
 async function _syncFromInner(profileId: string, sinceSeq: number, skipReconcile: boolean): Promise<void> {

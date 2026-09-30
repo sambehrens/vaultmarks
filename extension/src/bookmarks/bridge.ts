@@ -124,13 +124,16 @@ function isVirtualRootId(id: string): boolean {
 
 /**
  * Returns true if `id` is a valid parent ID for chrome.bookmarks.create().
- * Valid parents are non-virtual root containers and positive-integer Chrome IDs.
- * The virtual root ("0" / "root________") and Loro UUID strings are invalid.
+ * Valid parents are non-virtual root containers and native IDs of folders we
+ * have mapped. The virtual root ("0" / "root________") and unmapped Loro UUIDs
+ * (returned by loroParentToChrome when the parent has no Chrome counterpart)
+ * are invalid. Native IDs are numeric in Chrome but 12-char GUIDs in Firefox,
+ * so membership in the mapping is the only browser-independent test.
  */
 function isValidChromeParentId(id: string): boolean {
   if (isVirtualRootId(id)) return false;          // virtual root — never a parent
   if (_allNativeRootIds.has(id)) return true;     // e.g. "toolbar_____", "1"
-  return /^[1-9]\d*$/.test(id);                  // Chrome non-root numeric IDs
+  return _chromeToLoro.has(id);                   // mapped native folder ID
 }
 
 // ── Local ID mapping ──────────────────────────────────────────────────────────
@@ -395,6 +398,10 @@ export function attachBookmarkListeners(): void {
 export async function mergeLocalChangesIntoDoc(): Promise<void> {
   const chromeTree = await chrome.bookmarks.getTree();
   const currentChrome: Record<string, chrome.bookmarks.BookmarkTreeNode> = {};
+  // BFS visit order (parents before children). Needed because iterating
+  // `currentChrome` would yield numeric Chrome IDs in ascending order, which
+  // can reach a child before a newer parent folder has been mapped.
+  const visitOrder: chrome.bookmarks.BookmarkTreeNode[] = [];
   const queue = [...chromeTree];
   while (queue.length > 0) {
     const node = queue.shift()!;
@@ -407,11 +414,13 @@ export async function mergeLocalChangesIntoDoc(): Promise<void> {
     // unknown Firefox roots) and their entire subtree.
     if (node.parentId !== undefined && isVirtualRootId(node.parentId)) continue;
     currentChrome[node.id] = node;
+    visitOrder.push(node);
     if (node.children) queue.push(...node.children);
   }
 
   // 1. New Chrome bookmarks (not in mapping) → added while offline.
-  for (const [chromeId, node] of Object.entries(currentChrome)) {
+  for (const node of visitOrder) {
+    const chromeId = node.id;
     if (_chromeToLoro.has(chromeId)) continue;
     const loroId = crypto.randomUUID();
     const parentLoroId = chromeParentToLoro(node.parentId ?? "1");

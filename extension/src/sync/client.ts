@@ -305,26 +305,42 @@ async function _pushPendingInner(): Promise<void> {
 
 // ── Pull ──────────────────────────────────────────────────────────────────────
 
-/** Fetch all deltas since `sinceSeq` and decrypt them. */
+/**
+ * Fetch all deltas since `sinceSeq` and decrypt them. The server returns at
+ * most 500 deltas per page with `has_more` set when more remain, so keep
+ * paging until the tail is reached.
+ */
 export async function pullSince(sinceSeq: number, explicitProfileId?: string): Promise<RawDelta[]> {
   const profileId = explicitProfileId ?? getActiveProfileId();
   const jwt = getJwt();
   const encKey = getEncryptionKey();
 
-  const res = await fetchWithTimeout(
-    `${API_BASE}/sync/pull?profile_id=${profileId}&since_seq=${sinceSeq}`,
-    { headers: { Authorization: `Bearer ${jwt}` } },
-  );
-  await throwIfNotOk(res, "pull failed");
+  const result: RawDelta[] = [];
+  let cursor = sinceSeq;
+  while (true) {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/sync/pull?profile_id=${profileId}&since_seq=${cursor}`,
+      { headers: { Authorization: `Bearer ${jwt}` } },
+    );
+    await throwIfNotOk(res, "pull failed");
 
-  const data: { deltas: Array<{ sequence_id: number; encrypted_payload: string }> } = await res.json();
+    const data: {
+      deltas: Array<{ sequence_id: number; encrypted_payload: string }>;
+      has_more?: boolean;
+    } = await res.json();
 
-  return Promise.all(
-    data.deltas.map(async (d) => ({
-      sequenceId: d.sequence_id,
-      payload: await decrypt(encKey, d.encrypted_payload),
-    })),
-  );
+    const page = await Promise.all(
+      data.deltas.map(async (d) => ({
+        sequenceId: d.sequence_id,
+        payload: await decrypt(encKey, d.encrypted_payload),
+      })),
+    );
+    result.push(...page);
+
+    if (!data.has_more || page.length === 0) break;
+    cursor = page[page.length - 1].sequenceId;
+  }
+  return result;
 }
 
 // ── Server-Sent Events ────────────────────────────────────────────────────────

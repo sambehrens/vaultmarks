@@ -63,9 +63,9 @@ pub async fn create(
 
     let count = queries::count_profiles_by_user(&pool, user_id).await?;
     if count >= MAX_PROFILES_PER_USER {
-        return Err(AppError::BadRequest(
-            format!("cannot exceed {MAX_PROFILES_PER_USER} profiles per account"),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "cannot exceed {MAX_PROFILES_PER_USER} profiles per account"
+        )));
     }
 
     let metadata = B64

@@ -21,10 +21,7 @@ pub struct EventsQuery {
     pub profile_id: Uuid,
 }
 
-pub async fn handler(
-    State(state): State<AppState>,
-    Query(params): Query<EventsQuery>,
-) -> Response {
+pub async fn handler(State(state): State<AppState>, Query(params): Query<EventsQuery>) -> Response {
     let Ok((user_id, token_ver)) = verify_token(&params.token) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -32,19 +29,18 @@ pub async fn handler(
     // Match AuthUser's token_version check: reject JWTs whose embedded `ver`
     // claim no longer matches the user's current token_version (e.g. after a
     // password change on another device).
-    let current_ver: Option<i32> = match sqlx::query_scalar(
-        "SELECT token_version FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("events: failed to load token_version for user {user_id}: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let current_ver: Option<i32> =
+        match sqlx::query_scalar("SELECT token_version FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("events: failed to load token_version for user {user_id}: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
     match current_ver {
         Some(v) if v == token_ver => {}
         _ => return StatusCode::UNAUTHORIZED.into_response(),
@@ -52,15 +48,14 @@ pub async fn handler(
 
     // Propagate DB errors as 500 instead of silently treating them as 403.
     // A transient DB blip should not present as "account revoked" to the client.
-    let owned = match queries::profile_belongs_to_user(&state.pool, params.profile_id, user_id)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("events: profile_belongs_to_user failed: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let owned =
+        match queries::profile_belongs_to_user(&state.pool, params.profile_id, user_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("events: profile_belongs_to_user failed: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     if !owned {
         return StatusCode::FORBIDDEN.into_response();
@@ -74,7 +69,15 @@ pub async fn handler(
 
     tokio::spawn(async move {
         loop {
-            match broadcast_rx.recv().await {
+            // Also wait on `tx.closed()` so the task exits as soon as the client
+            // disconnects. Otherwise it would linger (holding a broadcast
+            // receiver and waking on every notification for every profile)
+            // until the next delta for *this* profile happened to arrive.
+            let msg = tokio::select! {
+                _ = tx.closed() => break,
+                msg = broadcast_rx.recv() => msg,
+            };
+            match msg {
                 Ok((pid, seq)) if pid == profile_id => {
                     if tx.send(seq).await.is_err() {
                         break; // SSE stream dropped — client disconnected
@@ -82,7 +85,9 @@ pub async fn handler(
                 }
                 Ok(_) => {} // different profile — ignore
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("sse: receiver lagged by {n} notifications for profile {profile_id}");
+                    tracing::warn!(
+                        "sse: receiver lagged by {n} notifications for profile {profile_id}"
+                    );
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
